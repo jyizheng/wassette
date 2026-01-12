@@ -1,0 +1,37 @@
+[package]
+name = "wasmrl-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Benchmark suite for WasmRL runtime performance"
+publish = false
+
+[dependencies]
+wasmrl-wit = { path = "../wasmrl-wit" }
+wasmrl-runtime = { path = "../wasmrl-runtime" }
+wasmrl-policy = { path = "../wasmrl-policy" }
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "step_throughput"
+harness = false
+
+[[bench]]
+name = "reset_performance"
+harness = false
+
+[[bench]]
+name = "batch_scaling"
+harness = false
+
+[[bench]]
+name = "memory_overhead"
+harness = false

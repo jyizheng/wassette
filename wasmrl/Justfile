@@ -1,0 +1,47 @@
+# WasmRL Development Commands
+
+set shell := ["bash", "-c"]
+
+# Build all crates
+build:
+    cargo build --workspace
+
+# Build in release mode
+build-release:
+    cargo build --workspace --release
+
+# Run all tests
+test:
+    cargo test --workspace
+
+# Run tests with output
+test-verbose:
+    cargo test --workspace -- --nocapture
+
+# Format code with nightly rustfmt
+fmt:
+    cargo +nightly fmt --all
+
+# Check formatting
+fmt-check:
+    cargo +nightly fmt --all -- --check
+
+# Run clippy linter
+lint:
+    cargo clippy --workspace -- -D warnings
+
+# Run cargo deny checks
+deny-check:
+    cargo deny check all
+
+# Clean build artifacts
+clean:
+    cargo clean
+
+# Run full CI locally (format + lint + build + test)
+ci: fmt-check lint build test
+    @echo "✓ CI checks passed"
+
+# Show help
+help:
+    @just --list

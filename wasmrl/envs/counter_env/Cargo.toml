@@ -1,0 +1,17 @@
+[package]
+name = "counter-env"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Microsoft"]
+description = "A minimal counter environment for WasmRL testing"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasmrl-sdk-rust = { path = "../../crates/wasmrl-sdk-rust" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
