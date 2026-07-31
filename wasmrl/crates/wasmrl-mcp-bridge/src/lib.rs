@@ -61,16 +61,16 @@
 
 mod config;
 mod error;
+mod overhead;
 mod session;
 mod tools;
-mod overhead;
 
 // Re-export main types
 pub use config::{McpBridgeConfig, SessionConfig};
 pub use error::{BridgeError, BridgeResult};
-pub use session::{EnvSession, SessionId, SessionManager};
-pub use tools::{EnvMcpBridge, McpTool, ToolResult};
 pub use overhead::{OverheadMetrics, TimingBreakdown};
+pub use session::{EnvSession, SessionId, SessionManager, SessionState};
+pub use tools::{EnvMcpBridge, McpTool, ToolResult};
 
 #[cfg(test)]
 mod tests {
@@ -91,9 +91,7 @@ mod tests {
 
     #[test]
     fn test_session_config() {
-        let config = SessionConfig::new()
-            .with_seed(42)
-            .with_auto_reset(true);
+        let config = SessionConfig::new().with_seed(42).with_auto_reset(true);
         assert_eq!(config.seed, Some(42));
         assert!(config.auto_reset);
     }

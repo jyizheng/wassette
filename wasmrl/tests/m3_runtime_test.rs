@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+
 use wasmrl_runtime::{
     BatchExecutor, ComponentRef, EnvRuntime, FactoryBuilder, InstanceHandle, InstancePool,
     InstanceStatus, LatencyStats, PolicyConfig, PoolStats, RuntimeConfig, RuntimeError,
@@ -270,12 +271,12 @@ fn test_factory_builder_configuration() {
         });
 
     // Check builder state
-    assert_eq!(builder.config.max_instances, 64);
-    assert_eq!(builder.config.max_memory_bytes, 128 * 1024 * 1024);
-    assert_eq!(builder.config.fuel_per_step, 500_000);
-    assert!(builder.config.prewarm_instances);
-    assert_eq!(builder.config.prewarm_count, 8);
-    assert!(!builder.policy.network_enabled);
+    assert_eq!(builder.config().max_instances, 64);
+    assert_eq!(builder.config().max_memory_bytes, 128 * 1024 * 1024);
+    assert_eq!(builder.config().fuel_per_step, 500_000);
+    assert!(builder.config().prewarm_instances);
+    assert_eq!(builder.config().prewarm_count, 8);
+    assert!(!builder.policy_config().network_enabled);
 }
 
 // ============================================================================

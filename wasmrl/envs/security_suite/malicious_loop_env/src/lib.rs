@@ -98,8 +98,7 @@ impl MaliciousLoopEnv {
         self.config = if config_json.is_empty() || config_json == "{}" {
             MaliciousConfig::default()
         } else {
-            serde_json::from_str(config_json)
-                .map_err(|e| format!("init failed: {}", e))?
+            serde_json::from_str(config_json).map_err(|e| format!("init failed: {}", e))?
         };
 
         if matches!(self.config.loop_on, LoopTrigger::Init) {

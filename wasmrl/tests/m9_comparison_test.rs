@@ -119,10 +119,10 @@ mod metrics_tests {
     fn test_scaling_linearity_check() {
         // Linear scaling: throughput doubles when env count doubles
         let points = vec![
-            (1, 10000.0),   // 1 env: 10k sps
-            (2, 19500.0),   // 2 env: ~20k sps (within 5% of linear)
-            (4, 38000.0),   // 4 env: ~40k sps
-            (8, 75000.0),   // 8 env: ~80k sps
+            (1, 10000.0), // 1 env: 10k sps
+            (2, 19500.0), // 2 env: ~20k sps (within 5% of linear)
+            (4, 38000.0), // 4 env: ~40k sps
+            (8, 75000.0), // 8 env: ~80k sps
         ];
 
         // Check scaling efficiency
@@ -414,6 +414,8 @@ mod integration_tests {
 // ============================================================================
 
 mod error_tests {
+    use std::time::Duration;
+
     #[test]
     fn test_error_types() {
         let error_types = [

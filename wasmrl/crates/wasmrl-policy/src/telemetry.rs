@@ -3,11 +3,12 @@
 
 //! Telemetry collection for policy enforcement.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
 
 /// Events that can be recorded by telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,7 +281,8 @@ impl TelemetryCollector {
     /// Record a step completion.
     pub fn record_step(&self, duration: Duration, fuel_consumed: u64) {
         self.steps.fetch_add(1, Ordering::Relaxed);
-        self.fuel_consumed.fetch_add(fuel_consumed, Ordering::Relaxed);
+        self.fuel_consumed
+            .fetch_add(fuel_consumed, Ordering::Relaxed);
 
         let duration_us = duration.as_micros() as u64;
         if let Ok(mut timings) = self.step_timings.lock() {
@@ -298,7 +300,8 @@ impl TelemetryCollector {
     /// Record a reset completion.
     pub fn record_reset(&self, duration: Duration, fuel_consumed: u64) {
         self.resets.fetch_add(1, Ordering::Relaxed);
-        self.fuel_consumed.fetch_add(fuel_consumed, Ordering::Relaxed);
+        self.fuel_consumed
+            .fetch_add(fuel_consumed, Ordering::Relaxed);
 
         let duration_us = duration.as_micros() as u64;
         if let Ok(mut timings) = self.reset_timings.lock() {

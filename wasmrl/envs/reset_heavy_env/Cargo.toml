@@ -7,6 +7,7 @@ authors.workspace = true
 description = "Reset-heavy environment for benchmarking fast reset optimization"
 
 [dependencies]
+anyhow.workspace = true
 wasmrl-wit.workspace = true
 wasmrl-sdk-rust.workspace = true
 serde.workspace = true

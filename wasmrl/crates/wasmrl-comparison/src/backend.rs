@@ -59,14 +59,17 @@ impl Backend {
 
     /// Check if this involves RPC/serialization overhead.
     pub fn has_rpc_overhead(&self) -> bool {
-        matches!(self, Self::McpTool | Self::DockerTask | Self::CrabDocker | Self::CrabVm | Self::Subprocess)
+        matches!(
+            self,
+            Self::McpTool | Self::DockerTask | Self::CrabDocker | Self::CrabVm | Self::Subprocess
+        )
     }
 
     /// Get expected relative overhead factor.
     pub fn expected_overhead_factor(&self) -> f64 {
         match self {
             Self::WasmInproc => 1.0,
-            Self::Native => 0.8,  // Slightly faster than Wasm
+            Self::Native => 0.8, // Slightly faster than Wasm
             Self::McpTool => 5.0,
             Self::Subprocess => 10.0,
             Self::DockerTask => 50.0,
@@ -293,7 +296,10 @@ impl DockerBackend {
 
     /// Create a CRAB Docker backend.
     pub fn crab_docker(task: &str) -> Self {
-        Self::new(format!("crab-benchmark/{}:latest", task), Backend::CrabDocker)
+        Self::new(
+            format!("crab-benchmark/{}:latest", task),
+            Backend::CrabDocker,
+        )
     }
 }
 
@@ -346,7 +352,7 @@ impl BackendRunner for DockerBackend {
     fn is_available(&self) -> bool {
         // Check if Docker is available
         // In real impl, would run `docker version`
-        false  // Disabled in test environment
+        false // Disabled in test environment
     }
 
     fn collect_metrics(&self) -> BackendMetrics {
@@ -366,6 +372,9 @@ pub struct SubprocessBackend {
     /// Whether initialized.
     initialized: bool,
 
+    /// Backend type represented by this subprocess runner.
+    backend_type: Backend,
+
     /// Collected metrics.
     metrics: BackendMetrics,
 }
@@ -373,11 +382,17 @@ pub struct SubprocessBackend {
 impl SubprocessBackend {
     /// Create a new subprocess backend.
     pub fn new(command: impl Into<String>) -> Self {
+        Self::with_backend(command, Backend::Subprocess)
+    }
+
+    /// Create a subprocess-like runner for a specific backend type.
+    pub fn with_backend(command: impl Into<String>, backend_type: Backend) -> Self {
         Self {
             command: command.into(),
             args: Vec::new(),
             initialized: false,
-            metrics: BackendMetrics::new(Backend::Subprocess),
+            backend_type,
+            metrics: BackendMetrics::new(backend_type),
         }
     }
 
@@ -390,7 +405,7 @@ impl SubprocessBackend {
 
 impl BackendRunner for SubprocessBackend {
     fn backend(&self) -> Backend {
-        Backend::Subprocess
+        self.backend_type
     }
 
     fn initialize(&mut self) -> ComparisonResult<()> {
@@ -464,7 +479,10 @@ mod tests {
 
     #[test]
     fn test_backend_parse() {
-        assert_eq!("wasm_inproc".parse::<Backend>().unwrap(), Backend::WasmInproc);
+        assert_eq!(
+            "wasm_inproc".parse::<Backend>().unwrap(),
+            Backend::WasmInproc
+        );
         assert_eq!("docker".parse::<Backend>().unwrap(), Backend::DockerTask);
         assert_eq!("seta-env".parse::<Backend>().unwrap(), Backend::DockerTask);
     }
@@ -477,8 +495,14 @@ mod tests {
 
     #[test]
     fn test_backend_overhead() {
-        assert!(Backend::WasmInproc.expected_overhead_factor() < Backend::DockerTask.expected_overhead_factor());
-        assert!(Backend::McpTool.expected_overhead_factor() < Backend::DockerTask.expected_overhead_factor());
+        assert!(
+            Backend::WasmInproc.expected_overhead_factor()
+                < Backend::DockerTask.expected_overhead_factor()
+        );
+        assert!(
+            Backend::McpTool.expected_overhead_factor()
+                < Backend::DockerTask.expected_overhead_factor()
+        );
     }
 
     #[test]

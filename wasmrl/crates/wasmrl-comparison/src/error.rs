@@ -4,6 +4,7 @@
 //! Error types for comparison framework.
 
 use std::fmt;
+
 use thiserror::Error;
 
 /// Result type alias for comparison operations.

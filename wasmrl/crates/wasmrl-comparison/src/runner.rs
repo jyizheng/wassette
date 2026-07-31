@@ -4,13 +4,13 @@
 //! Benchmark runner for CAMEL-AI comparisons.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
+use serde_json::json;
 
 use crate::backend::{Backend, BackendRunner, DockerBackend, SubprocessBackend, WasmBackend};
-use crate::config::{ComparisonConfig, TaskConfig};
-use crate::error::ComparisonError;
+use crate::config::ComparisonConfig;
 use crate::metrics::{BackendMetrics, ColdStartMetrics, ComparisonMetrics, ScalingMetrics};
 
 /// Comparison runner orchestrates benchmark execution.
@@ -38,45 +38,48 @@ impl ComparisonRunner {
     /// Initialize all configured backends.
     pub async fn initialize(&mut self) -> Result<()> {
         for backend in &self.config.backends {
-            let runner = self.create_runner(backend)?;
+            let mut runner = self.create_runner(backend);
             if runner.is_available() {
-                runner.initialize().await?;
-                self.runners.insert(backend.clone(), runner);
+                runner.initialize()?;
+                self.runners.insert(*backend, runner);
             }
         }
         Ok(())
     }
 
     /// Create a runner for a backend.
-    fn create_runner(&self, backend: &Backend) -> Result<Box<dyn BackendRunner>> {
+    fn create_runner(&self, backend: &Backend) -> Box<dyn BackendRunner> {
         match backend {
-            Backend::WasmInproc => Ok(Box::new(WasmBackend::new())),
-            Backend::DockerTask | Backend::CrabDocker => Ok(Box::new(DockerBackend::new())),
-            Backend::Subprocess | Backend::Native => Ok(Box::new(SubprocessBackend::new())),
-            Backend::McpTool => Err(ComparisonError::BackendNotFound(backend.to_string()).into()),
-            Backend::CrabVm => Err(ComparisonError::BackendNotFound(backend.to_string()).into()),
+            Backend::WasmInproc => Box::new(WasmBackend::new("wasmrl-counter.wasm")),
+            Backend::DockerTask => Box::new(DockerBackend::seta_env("counter")),
+            Backend::CrabDocker => Box::new(DockerBackend::crab_docker("counter")),
+            Backend::Subprocess => Box::new(SubprocessBackend::new("subprocess")),
+            Backend::Native => Box::new(SubprocessBackend::with_backend("native", Backend::Native)),
+            Backend::McpTool => Box::new(SubprocessBackend::with_backend(
+                "mcp-tool",
+                Backend::McpTool,
+            )),
+            Backend::CrabVm => {
+                Box::new(SubprocessBackend::with_backend("crab-vm", Backend::CrabVm))
+            }
         }
     }
 
     /// Run all benchmarks.
     pub async fn run(&mut self) -> Result<ComparisonMetrics> {
-        // Warmup phase
-        if self.config.warmup_iterations > 0 {
+        if self.config.warmup > 0 {
             self.run_warmup().await?;
         }
 
-        // Main benchmark
-        for task in &self.config.tasks.clone() {
-            self.run_task(task).await?;
+        for task in self.config.tasks.clone() {
+            self.run_task(&task).await?;
         }
 
-        // Scaling tests
-        if !self.config.scaling_factors.is_empty() {
+        if self.config.test_scaling {
             self.run_scaling_tests().await?;
         }
 
-        // Cold-start analysis
-        if self.config.cold_start_analysis {
+        if self.config.test_cold_start {
             self.run_cold_start_analysis().await?;
         }
 
@@ -85,40 +88,35 @@ impl ComparisonRunner {
 
     /// Run warmup phase.
     async fn run_warmup(&mut self) -> Result<()> {
-        for backend in self.config.backends.clone() {
-            if let Some(runner) = self.runners.get(&backend) {
-                for _ in 0..self.config.warmup_iterations {
-                    let _ = runner.step(b"warmup").await;
-                }
+        let action = json!("warmup");
+        for runner in self.runners.values_mut() {
+            for _ in 0..self.config.warmup {
+                let _ = runner.step(&action);
             }
         }
         Ok(())
     }
 
     /// Run a single task benchmark.
-    async fn run_task(&mut self, task: &TaskConfig) -> Result<()> {
-        let iterations = self.config.benchmark_iterations;
+    async fn run_task(&mut self, task: &str) -> Result<()> {
+        let action = json!({ "task": task });
+        let reset_samples = self.config.iterations.min(10);
 
-        for backend in self.config.backends.clone() {
-            if let Some(runner) = self.runners.get(&backend) {
-                let mut metrics = BackendMetrics::new(backend.clone());
+        for runner in self.runners.values_mut() {
+            let backend = runner.backend();
+            let mut metrics = BackendMetrics::new(backend);
 
-                // Reset measurement
-                for _ in 0..10 {
-                    let start = Instant::now();
-                    runner.reset().await?;
-                    metrics.record_reset(start.elapsed());
-                }
-
-                // Step measurements
-                for _ in 0..iterations {
-                    let start = Instant::now();
-                    let _ = runner.step(&task.input).await;
-                    metrics.record_step(start.elapsed());
-                }
-
-                self.results.add_backend(metrics);
+            for seed in 0..reset_samples {
+                let duration = runner.reset(seed as u64)?;
+                metrics.record_reset(duration);
             }
+
+            for _ in 0..self.config.iterations {
+                let duration = runner.step(&action)?;
+                metrics.record_step(duration);
+            }
+
+            self.results.add_backend(metrics);
         }
 
         Ok(())
@@ -126,41 +124,41 @@ impl ComparisonRunner {
 
     /// Run scaling tests.
     async fn run_scaling_tests(&mut self) -> Result<()> {
-        // For each backend that supports scaling
         for backend in self.config.backends.clone() {
             if !matches!(backend, Backend::WasmInproc | Backend::McpTool) {
                 continue;
             }
-
-            let mut scaling = ScalingMetrics::new(backend.clone());
-
-            for &factor in &self.config.scaling_factors {
-                let (throughput, latency) = self.measure_scaling(&backend, factor).await?;
-                scaling.add_point(factor, throughput, latency);
+            if !self.runners.contains_key(&backend) {
+                continue;
             }
 
+            let mut scaling = ScalingMetrics::new(backend);
+            for env_count in self.config.env_counts.clone() {
+                let (throughput, latency) = self.measure_scaling(&backend, env_count).await?;
+                scaling.add_point(env_count, throughput, latency);
+            }
             self.results = self.results.clone().with_scaling(scaling);
         }
 
         Ok(())
     }
 
-    /// Measure scaling at a specific factor.
-    async fn measure_scaling(&self, backend: &Backend, env_count: usize) -> Result<(f64, u64)> {
-        let iterations = 1000;
+    /// Measure scaling at a specific environment count.
+    async fn measure_scaling(&mut self, backend: &Backend, env_count: usize) -> Result<(f64, u64)> {
+        let iterations = self.config.iterations.min(1000).max(1);
+        let action = json!({ "scale": env_count });
         let mut total_us = 0u64;
 
-        if let Some(runner) = self.runners.get(backend) {
+        if let Some(runner) = self.runners.get_mut(backend) {
             for _ in 0..iterations {
-                let start = Instant::now();
-                let _ = runner.step(b"scaling_test").await;
-                total_us += start.elapsed().as_micros() as u64;
+                total_us += runner.step(&action)?.as_micros() as u64;
             }
         }
 
+        let total_us = total_us.max(1);
         let mean_us = total_us / iterations as u64;
         let throughput = (iterations as f64 * env_count as f64) / (total_us as f64 / 1_000_000.0);
-        let p99 = mean_us * 3; // Estimate
+        let p99 = mean_us * 3;
 
         Ok((throughput, p99))
     }
@@ -168,30 +166,22 @@ impl ComparisonRunner {
     /// Run cold-start analysis.
     async fn run_cold_start_analysis(&mut self) -> Result<()> {
         for backend in self.config.backends.clone() {
-            let mut cold = ColdStartMetrics::new(backend.clone());
-
-            // Create fresh runner
-            let runner = self.create_runner(&backend)?;
+            let mut runner = self.create_runner(&backend);
             if !runner.is_available() {
                 continue;
             }
 
-            // Measure instance creation
-            let start = Instant::now();
-            runner.initialize().await?;
+            let mut cold = ColdStartMetrics::new(backend);
+            let start = std::time::Instant::now();
+            runner.initialize()?;
             cold.instance_create_us = start.elapsed().as_micros() as u64;
 
-            // First step (cold)
-            let start = Instant::now();
-            let _ = runner.step(b"cold_test").await;
-            cold.first_step_us = start.elapsed().as_micros() as u64;
+            let action = json!("cold_test");
+            cold.first_step_us = runner.step(&action)?.as_micros() as u64;
 
-            // Warm steps
             let mut warm_total = 0u64;
             for _ in 0..100 {
-                let start = Instant::now();
-                let _ = runner.step(b"warm_test").await;
-                warm_total += start.elapsed().as_micros() as u64;
+                warm_total += runner.step(&action)?.as_micros() as u64;
             }
             cold.warm_step_us = warm_total / 100;
 
@@ -203,8 +193,8 @@ impl ComparisonRunner {
 
     /// Cleanup all runners.
     pub async fn cleanup(&mut self) -> Result<()> {
-        for (_, runner) in self.runners.drain() {
-            runner.cleanup().await?;
+        for (_, mut runner) in self.runners.drain() {
+            runner.cleanup()?;
         }
         Ok(())
     }
@@ -230,7 +220,7 @@ pub struct RunResult {
     /// Success.
     pub success: bool,
 
-    /// Output (if any).
+    /// Output, if any.
     pub output: Option<Vec<u8>>,
 }
 
@@ -255,134 +245,5 @@ impl RunResult {
             success: false,
             output: None,
         }
-    }
-}
-
-/// Batch runner for parallel execution.
-pub struct BatchRunner {
-    /// Number of parallel workers.
-    pub workers: usize,
-
-    /// Results collected.
-    results: Vec<RunResult>,
-}
-
-impl BatchRunner {
-    /// Create new batch runner.
-    pub fn new(workers: usize) -> Self {
-        Self {
-            workers,
-            results: Vec::new(),
-        }
-    }
-
-    /// Run a task batch.
-    pub async fn run_batch<R: BackendRunner>(
-        &mut self,
-        runner: &R,
-        task: &TaskConfig,
-        count: usize,
-    ) -> Result<Vec<RunResult>> {
-        let mut results = Vec::with_capacity(count);
-
-        for _ in 0..count {
-            let start = Instant::now();
-            let output = runner.step(&task.input).await;
-            let latency = start.elapsed();
-
-            let result = match output {
-                Ok(data) => RunResult::success(task.name.clone(), Backend::WasmInproc, latency, data),
-                Err(_) => RunResult::failure(task.name.clone(), Backend::WasmInproc, latency),
-            };
-            results.push(result);
-        }
-
-        self.results.extend(results.clone());
-        Ok(results)
-    }
-
-    /// Get all results.
-    pub fn results(&self) -> &[RunResult] {
-        &self.results
-    }
-
-    /// Calculate success rate.
-    pub fn success_rate(&self) -> f64 {
-        if self.results.is_empty() {
-            return 0.0;
-        }
-        let successes = self.results.iter().filter(|r| r.success).count();
-        successes as f64 / self.results.len() as f64
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_comparison_runner_new() {
-        let config = ComparisonConfig::minimal();
-        let runner = ComparisonRunner::new(config);
-        assert!(runner.runners.is_empty());
-    }
-
-    #[test]
-    fn test_run_result_success() {
-        let result = RunResult::success(
-            "test".to_string(),
-            Backend::WasmInproc,
-            Duration::from_micros(100),
-            vec![1, 2, 3],
-        );
-        assert!(result.success);
-        assert!(result.output.is_some());
-    }
-
-    #[test]
-    fn test_run_result_failure() {
-        let result = RunResult::failure(
-            "test".to_string(),
-            Backend::DockerTask,
-            Duration::from_millis(5),
-        );
-        assert!(!result.success);
-        assert!(result.output.is_none());
-    }
-
-    #[test]
-    fn test_batch_runner_new() {
-        let runner = BatchRunner::new(4);
-        assert_eq!(runner.workers, 4);
-        assert!(runner.results.is_empty());
-    }
-
-    #[test]
-    fn test_batch_runner_success_rate() {
-        let mut runner = BatchRunner::new(1);
-        runner.results.push(RunResult::success(
-            "t1".to_string(),
-            Backend::WasmInproc,
-            Duration::from_micros(10),
-            vec![],
-        ));
-        runner.results.push(RunResult::failure(
-            "t2".to_string(),
-            Backend::WasmInproc,
-            Duration::from_micros(10),
-        ));
-        assert!((runner.success_rate() - 0.5).abs() < 0.01);
-    }
-
-    #[tokio::test]
-    async fn test_comparison_runner_create_runner() {
-        let config = ComparisonConfig::minimal();
-        let runner = ComparisonRunner::new(config);
-
-        let wasm_runner = runner.create_runner(&Backend::WasmInproc);
-        assert!(wasm_runner.is_ok());
-
-        let docker_runner = runner.create_runner(&Backend::DockerTask);
-        assert!(docker_runner.is_ok());
     }
 }

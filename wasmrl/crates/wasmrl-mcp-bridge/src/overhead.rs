@@ -37,11 +37,7 @@ impl TimingBreakdown {
     }
 
     /// Create from duration measurements.
-    pub fn from_durations(
-        rpc: Duration,
-        runtime: Duration,
-        env: Duration,
-    ) -> Self {
+    pub fn from_durations(rpc: Duration, runtime: Duration, env: Duration) -> Self {
         Self::new(
             rpc.as_micros() as u64,
             runtime.as_micros() as u64,
@@ -127,10 +123,14 @@ impl OverheadMetrics {
     /// Record a timing breakdown.
     pub fn record_breakdown(&mut self, breakdown: &TimingBreakdown) {
         self.total_calls += 1;
-        self.total_rpc_us.fetch_add(breakdown.rpc_serialization_us, Ordering::Relaxed);
-        self.total_runtime_us.fetch_add(breakdown.runtime_overhead_us, Ordering::Relaxed);
-        self.total_env_us.fetch_add(breakdown.env_compute_us, Ordering::Relaxed);
-        self.total_time_us.fetch_add(breakdown.total_us, Ordering::Relaxed);
+        self.total_rpc_us
+            .fetch_add(breakdown.rpc_serialization_us, Ordering::Relaxed);
+        self.total_runtime_us
+            .fetch_add(breakdown.runtime_overhead_us, Ordering::Relaxed);
+        self.total_env_us
+            .fetch_add(breakdown.env_compute_us, Ordering::Relaxed);
+        self.total_time_us
+            .fetch_add(breakdown.total_us, Ordering::Relaxed);
 
         let overhead = breakdown.overhead_ratio();
         {
@@ -177,13 +177,21 @@ impl OverheadMetrics {
     /// Get minimum overhead ratio.
     pub fn min_overhead_ratio(&self) -> f64 {
         let min = *self.min_overhead.lock().unwrap();
-        if min == f64::MAX { 0.0 } else { min }
+        if min == f64::MAX {
+            0.0
+        } else {
+            min
+        }
     }
 
     /// Get maximum overhead ratio.
     pub fn max_overhead_ratio(&self) -> f64 {
         let max = *self.max_overhead.lock().unwrap();
-        if max == f64::MIN { 0.0 } else { max }
+        if max == f64::MIN {
+            0.0
+        } else {
+            max
+        }
     }
 
     /// Get average call duration.
@@ -277,20 +285,26 @@ impl OverheadSummary {
     }
 
     fn rpc_percentage(&self) -> f64 {
-        if self.total_us() == 0 { 0.0 } else { 
-            self.total_rpc_us as f64 / self.total_us() as f64 * 100.0 
+        if self.total_us() == 0 {
+            0.0
+        } else {
+            self.total_rpc_us as f64 / self.total_us() as f64 * 100.0
         }
     }
 
     fn runtime_percentage(&self) -> f64 {
-        if self.total_us() == 0 { 0.0 } else { 
-            self.total_runtime_us as f64 / self.total_us() as f64 * 100.0 
+        if self.total_us() == 0 {
+            0.0
+        } else {
+            self.total_runtime_us as f64 / self.total_us() as f64 * 100.0
         }
     }
 
     fn env_percentage(&self) -> f64 {
-        if self.total_us() == 0 { 0.0 } else { 
-            self.total_env_us as f64 / self.total_us() as f64 * 100.0 
+        if self.total_us() == 0 {
+            0.0
+        } else {
+            self.total_env_us as f64 / self.total_us() as f64 * 100.0
         }
     }
 }

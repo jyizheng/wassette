@@ -71,7 +71,7 @@ impl ComparisonMetrics {
                     .unwrap_or(1.0);
 
                 ComparisonRow {
-                    backend: m.backend.to_string(),
+                    backend: format!("{:?}", m.backend),
                     step_mean_us: m.step_mean_us,
                     step_p99_us: m.step_p99_us,
                     reset_mean_us: m.reset_mean_us,
@@ -173,7 +173,11 @@ impl BackendMetrics {
             return;
         }
 
-        let mut sorted: Vec<u64> = self.step_latencies.iter().map(|d| d.as_micros() as u64).collect();
+        let mut sorted: Vec<u64> = self
+            .step_latencies
+            .iter()
+            .map(|d| d.as_micros() as u64)
+            .collect();
         sorted.sort();
 
         let n = sorted.len();
@@ -198,7 +202,11 @@ impl BackendMetrics {
             return;
         }
 
-        let mut sorted: Vec<u64> = self.reset_latencies.iter().map(|d| d.as_micros() as u64).collect();
+        let mut sorted: Vec<u64> = self
+            .reset_latencies
+            .iter()
+            .map(|d| d.as_micros() as u64)
+            .collect();
         sorted.sort();
 
         let n = sorted.len();

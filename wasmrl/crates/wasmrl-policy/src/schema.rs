@@ -3,8 +3,9 @@
 
 //! Policy schema definitions and parsing.
 
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 /// Complete policy configuration for WasmRL environments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,8 +57,8 @@ impl Policy {
 
     /// Load policy from file (auto-detects TOML or JSON).
     pub fn from_file(path: &std::path::Path) -> crate::PolicyResult<Self> {
-        let content =
-            std::fs::read_to_string(path).map_err(|e| crate::PolicyError::IoError(e.to_string()))?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| crate::PolicyError::IoError(e.to_string()))?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         match ext.to_lowercase().as_str() {
@@ -115,16 +116,18 @@ impl Policy {
 
     /// Check if a filesystem path is readable.
     pub fn allows_read(&self, path: &str) -> bool {
-        self.wasi.filesystem_read.iter().any(|allowed| {
-            path.starts_with(allowed.to_string_lossy().as_ref())
-        })
+        self.wasi
+            .filesystem_read
+            .iter()
+            .any(|allowed| path.starts_with(allowed.to_string_lossy().as_ref()))
     }
 
     /// Check if a filesystem path is writable.
     pub fn allows_write(&self, path: &str) -> bool {
-        self.wasi.filesystem_write.iter().any(|allowed| {
-            path.starts_with(allowed.to_string_lossy().as_ref())
-        })
+        self.wasi
+            .filesystem_write
+            .iter()
+            .any(|allowed| path.starts_with(allowed.to_string_lossy().as_ref()))
     }
 }
 
@@ -430,7 +433,7 @@ impl WasiConfig {
 }
 
 /// Additional capability configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityConfig {
     /// Allow threading/atomics.
     #[serde(default)]
@@ -450,6 +453,19 @@ pub struct CapabilityConfig {
     /// Custom capability flags.
     #[serde(default)]
     pub custom: std::collections::HashMap<String, bool>,
+}
+
+impl Default for CapabilityConfig {
+    fn default() -> Self {
+        Self {
+            threading: false,
+            simd: true,
+            component_model: true,
+            multi_memory: false,
+            bulk_memory: true,
+            custom: std::collections::HashMap::new(),
+        }
+    }
 }
 
 impl CapabilityConfig {

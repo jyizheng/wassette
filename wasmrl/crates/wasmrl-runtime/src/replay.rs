@@ -12,7 +12,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use wasmrl_wit::{SnapshotData, StepResult, Tensor};
+use serde::{Deserialize, Serialize};
+use wasmrl_wit::{DType, SnapshotData, StepResult, Tensor};
 
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::instance::InstanceHandle;
@@ -20,6 +21,8 @@ use crate::instance::InstanceHandle;
 /// Configuration for replay recording.
 #[derive(Debug, Clone)]
 pub struct ReplayConfig {
+    /// Whether replay recording is enabled.
+    pub enabled: bool,
     /// Save snapshot every K steps (0 = disabled).
     pub snapshot_interval: u64,
     /// Maximum number of snapshots to retain.
@@ -35,6 +38,7 @@ pub struct ReplayConfig {
 impl Default for ReplayConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             snapshot_interval: 100,
             max_snapshots: 10,
             record_actions: true,
@@ -48,6 +52,7 @@ impl ReplayConfig {
     /// Create config with snapshots disabled.
     pub fn actions_only() -> Self {
         Self {
+            enabled: true,
             snapshot_interval: 0,
             record_actions: true,
             ..Default::default()
@@ -64,13 +69,14 @@ impl ReplayConfig {
 }
 
 /// A recorded checkpoint with snapshot and step number.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// Step number when this checkpoint was created.
     pub step: u64,
     /// Snapshot data.
     pub snapshot: SnapshotData,
     /// Timestamp when checkpoint was created.
+    #[serde(skip, default = "Instant::now")]
     pub timestamp: Instant,
 }
 
@@ -86,7 +92,7 @@ impl Checkpoint {
 }
 
 /// A recorded action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordedAction {
     /// Step number.
     pub step: u64,
@@ -97,7 +103,7 @@ pub struct RecordedAction {
 }
 
 /// Recorded result of an action.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordedResult {
     /// Reward received.
     pub reward: f64,
@@ -165,6 +171,10 @@ impl ReplayRecorder {
 
     /// Record the start of a new episode.
     pub fn record_reset(&mut self, seed: u64, initial_snapshot: Option<SnapshotData>) {
+        if !self.config.enabled {
+            return;
+        }
+
         self.step_count = 0;
         self.episode += 1;
         self.initial_seed = seed;
@@ -179,12 +189,15 @@ impl ReplayRecorder {
 
     /// Record an action and its result.
     pub fn record_step(&mut self, action: Tensor, result: Option<&StepResult>) {
+        if !self.config.enabled {
+            return;
+        }
+
         self.step_count += 1;
 
         if self.config.record_actions {
-            let recorded_result = result.map(|r| {
-                RecordedResult::from_step_result(r, self.config.record_observations)
-            });
+            let recorded_result = result
+                .map(|r| RecordedResult::from_step_result(r, self.config.record_observations));
 
             let recorded = RecordedAction {
                 step: self.step_count,
@@ -203,6 +216,10 @@ impl ReplayRecorder {
 
     /// Add a checkpoint snapshot.
     pub fn add_checkpoint(&mut self, snapshot: SnapshotData) {
+        if !self.config.enabled {
+            return;
+        }
+
         let checkpoint = Checkpoint::new(self.step_count, snapshot);
         self.checkpoints.push_back(checkpoint);
 
@@ -235,10 +252,7 @@ impl ReplayRecorder {
 
     /// Get actions from a checkpoint to current.
     pub fn get_actions_from(&self, from_step: u64) -> Vec<&RecordedAction> {
-        self.actions
-            .iter()
-            .filter(|a| a.step > from_step)
-            .collect()
+        self.actions.iter().filter(|a| a.step > from_step).collect()
     }
 
     /// Get all actions for current episode.
@@ -265,6 +279,40 @@ impl ReplayRecorder {
             target_step,
             initial_seed: self.initial_seed,
         })
+    }
+
+    /// Record raw initial state bytes.
+    pub fn record_initial_state(&mut self, state: Vec<u8>, seed: u64) {
+        self.record_reset(seed, Some(SnapshotData::new(state)));
+    }
+
+    /// Record a raw action and simple result metadata.
+    pub fn record_action(
+        &mut self,
+        action: Vec<u8>,
+        reward: f64,
+        terminated: bool,
+        truncated: bool,
+    ) {
+        let action_len = action.len() as u32;
+        let tensor = Tensor::new(DType::Uint8, vec![action_len], action);
+        let result = StepResult::new(
+            Tensor::zeros(DType::Uint8, vec![0]),
+            reward,
+            terminated,
+            truncated,
+        );
+        self.record_step(tensor, Some(&result));
+    }
+
+    /// Record a raw checkpoint snapshot.
+    pub fn record_checkpoint(&mut self, snapshot: Vec<u8>) {
+        self.add_checkpoint(SnapshotData::new(snapshot));
+    }
+
+    /// Get replay data for the current step.
+    pub fn to_replay_data(&self) -> Option<ReplayData> {
+        self.get_replay_data(self.step_count)
     }
 
     /// Get current step count.
@@ -301,7 +349,7 @@ impl ReplayRecorder {
 }
 
 /// Data needed to replay to a specific step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayData {
     /// Checkpoint to restore from.
     pub checkpoint: Checkpoint,
@@ -345,6 +393,12 @@ impl ReplayManager {
             .or_insert_with(|| ReplayRecorder::new(handle, self.default_config.clone()))
     }
 
+    /// Create a recorder for an instance ID if one does not already exist.
+    pub fn create_recorder(&mut self, instance_id: u64) {
+        let handle = InstanceHandle { id: instance_id };
+        self.get_or_create(handle);
+    }
+
     /// Get a recorder for an instance.
     pub fn get(&self, handle: InstanceHandle) -> Option<&ReplayRecorder> {
         self.recorders.get(&handle.id)
@@ -353,6 +407,18 @@ impl ReplayManager {
     /// Get mutable recorder.
     pub fn get_mut(&mut self, handle: InstanceHandle) -> Option<&mut ReplayRecorder> {
         self.recorders.get_mut(&handle.id)
+    }
+
+    /// Get mutable recorder by instance ID.
+    pub fn get_recorder_mut(&mut self, instance_id: u64) -> Option<&mut ReplayRecorder> {
+        self.get_mut(InstanceHandle { id: instance_id })
+    }
+
+    /// Get replay data for an instance ID at its current step.
+    pub fn get_replay_data(&self, instance_id: u64) -> Option<ReplayData> {
+        self.recorders
+            .get(&instance_id)
+            .and_then(ReplayRecorder::to_replay_data)
     }
 
     /// Remove a recorder.
@@ -378,15 +444,12 @@ impl ReplayManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wasmrl_wit::DType;
 
+    use super::*;
+
     fn make_action(value: i32) -> Tensor {
-        Tensor::new(
-            DType::Int32,
-            vec![1],
-            value.to_le_bytes().to_vec(),
-        )
+        Tensor::new(DType::Int32, vec![1], value.to_le_bytes().to_vec())
     }
 
     fn make_snapshot(step: u64) -> SnapshotData {
@@ -583,7 +646,10 @@ mod tests {
 
         assert_eq!(manager.len(), 2);
 
-        manager.get_mut(h1).unwrap().record_step(make_action(0), None);
+        manager
+            .get_mut(h1)
+            .unwrap()
+            .record_step(make_action(0), None);
         assert_eq!(manager.get(h1).unwrap().step_count(), 1);
 
         manager.remove(h1);

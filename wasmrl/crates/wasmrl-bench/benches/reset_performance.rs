@@ -6,8 +6,9 @@
 //! Measures reset performance comparing full reset vs fast reset (snapshot restore).
 //! Target: restore >= 2x improvement for reset-heavy workloads
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::time::Duration;
+
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use wasmrl_runtime::{EnvConfig, EnvFactory, WasmEnvInstance};
 
 /// Path to the reset-heavy environment component.
@@ -15,7 +16,8 @@ const RESET_HEAVY_ENV_PATH: &str =
     "../../envs/reset_heavy_env/target/wasm32-wasip2/release/reset_heavy_env.wasm";
 
 /// Path to the counter environment component.
-const COUNTER_ENV_PATH: &str = "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
+const COUNTER_ENV_PATH: &str =
+    "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
 
 /// Benchmark full reset (re-initialization).
 fn bench_full_reset(c: &mut Criterion) {
@@ -114,7 +116,7 @@ fn bench_reset_comparison(c: &mut Criterion) {
         });
     });
 
-    // Fast reset benchmark  
+    // Fast reset benchmark
     group.bench_function("fast_reset_restore", |b| {
         let mut instance = factory.create(&component_bytes, &config).unwrap();
         instance.init().unwrap();

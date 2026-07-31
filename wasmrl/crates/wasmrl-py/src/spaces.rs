@@ -76,23 +76,6 @@ impl PyBox {
         )
     }
 
-    /// Create a Box with uniform bounds.
-    #[staticmethod]
-    #[pyo3(signature = (low, high, shape, dtype="float32"))]
-    pub fn uniform(low: f64, high: f64, shape: Vec<usize>, dtype: &str) -> (Self, PySpace) {
-        let size: usize = shape.iter().product();
-        (
-            PyBox {
-                low: vec![low; size],
-                high: vec![high; size],
-            },
-            PySpace {
-                shape,
-                dtype: dtype.to_string(),
-            },
-        )
-    }
-
     /// Check if value is within bounds.
     pub fn contains(&self, value: Vec<f64>) -> bool {
         if value.len() != self.low.len() {
@@ -111,7 +94,7 @@ impl PyBox {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        
+
         let mut rng_state = seed;
         self.low
             .iter()
@@ -130,6 +113,23 @@ impl PyBox {
             "Box(low={:.2?}, high={:.2?})",
             &self.low[..self.low.len().min(4)],
             &self.high[..self.high.len().min(4)]
+        )
+    }
+}
+
+impl PyBox {
+    /// Create a Box with uniform bounds for Rust callers.
+    pub fn uniform(low: f64, high: f64, shape: Vec<usize>, dtype: &str) -> (Self, PySpace) {
+        let size: usize = shape.iter().product();
+        (
+            PyBox {
+                low: vec![low; size],
+                high: vec![high; size],
+            },
+            PySpace {
+                shape,
+                dtype: dtype.to_string(),
+            },
         )
     }
 }
@@ -232,7 +232,7 @@ impl PyMultiDiscrete {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        
+
         self.nvec
             .iter()
             .map(|n| {

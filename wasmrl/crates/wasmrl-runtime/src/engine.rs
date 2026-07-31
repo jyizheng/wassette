@@ -8,11 +8,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::config::RuntimeConfig;
 
 /// State held in Wasmtime Store for WasmRL environments.
-#[derive(Debug, Default)]
 pub struct EnvState {
     /// Fuel consumed during execution.
     pub fuel_consumed: u64,
@@ -20,12 +20,22 @@ pub struct EnvState {
     pub trapped: bool,
     /// Last error message if any.
     pub last_error: Option<String>,
+    /// WASI context exposed to component-model WASI imports.
+    wasi: WasiCtx,
+    /// Component resource table for WASI-owned resources.
+    table: ResourceTable,
 }
 
 impl EnvState {
     /// Create a new empty state.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            fuel_consumed: 0,
+            trapped: false,
+            last_error: None,
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+        }
     }
 
     /// Record that a trap occurred.
@@ -38,6 +48,33 @@ impl EnvState {
     pub fn clear_error(&mut self) {
         self.trapped = false;
         self.last_error = None;
+    }
+}
+
+impl Default for EnvState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WasiView for EnvState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
+}
+
+impl std::fmt::Debug for EnvState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvState")
+            .field("fuel_consumed", &self.fuel_consumed)
+            .field("trapped", &self.trapped)
+            .field("last_error", &self.last_error)
+            .field("wasi", &"<WasiCtx>")
+            .field("table", &"<ResourceTable>")
+            .finish()
     }
 }
 
@@ -70,13 +107,13 @@ impl EngineContext {
 
         // Memory configuration
         config.max_wasm_stack(512 * 1024); // 512 KB stack
-        config.dynamic_memory_growth_reserve(1024 * 1024 * 1024); // 1 GB reserve
+        config.memory_reservation_for_growth(1024 * 1024 * 1024); // 1 GB reserve
 
         let engine = Arc::new(Engine::new(&config)?);
 
         // Create linker with WASI support
         let mut linker = Linker::new(engine.as_ref());
-        wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
 
         Ok(Self {
             engine,

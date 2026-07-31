@@ -17,8 +17,8 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-pyo3 = { version = "0.22", features = ["extension-module"] }
-numpy = "0.22"
+pyo3 = "0.29"
+numpy = "0.29"
 
 # Internal crates
 wasmrl-wit = { workspace = true }
@@ -26,7 +26,7 @@ wasmrl-runtime = { workspace = true }
 wasmrl-policy = { workspace = true }
 
 [dev-dependencies]
-pyo3 = { version = "0.22", features = ["auto-initialize"] }
+pyo3 = { version = "0.29", features = ["auto-initialize"] }
 
 [features]
 default = []

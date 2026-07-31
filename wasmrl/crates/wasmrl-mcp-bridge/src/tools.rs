@@ -320,7 +320,10 @@ impl EnvMcpBridge {
     /// Handle create session tool.
     fn handle_create(&mut self, args: Value) -> BridgeResult<Value> {
         let seed = args.get("seed").and_then(|v| v.as_u64());
-        let auto_reset = args.get("auto_reset").and_then(|v| v.as_bool()).unwrap_or(false);
+        let auto_reset = args
+            .get("auto_reset")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let env_config = args.get("config").cloned();
 
         let mut config = SessionConfig::new().with_auto_reset(auto_reset);
@@ -360,7 +363,7 @@ impl EnvMcpBridge {
         }
 
         // Simulate reset (in real impl, this would call the runtime)
-        let observation = self.simulate_reset(seed);
+        let observation = Self::simulate_reset(seed);
         session.mark_reset(observation.clone());
 
         debug!(session_id = %session_id, seed = %seed, "Session reset");
@@ -395,7 +398,7 @@ impl EnvMcpBridge {
         }
 
         // Simulate step (in real impl, this would call the runtime)
-        let (observation, reward, terminated, truncated) = self.simulate_step(&action);
+        let (observation, reward, terminated, truncated) = Self::simulate_step(&action);
         session.mark_step(observation.clone(), reward, terminated || truncated);
 
         debug!(
@@ -483,13 +486,13 @@ impl EnvMcpBridge {
     }
 
     /// Simulate a reset (placeholder for actual runtime call).
-    fn simulate_reset(&self, seed: u64) -> Value {
+    fn simulate_reset(seed: u64) -> Value {
         // In real implementation, this would call wasmrl-runtime
         json!([seed as f64 % 1.0, 0.0, 0.0, 0.0])
     }
 
     /// Simulate a step (placeholder for actual runtime call).
-    fn simulate_step(&self, _action: &Value) -> (Value, f64, bool, bool) {
+    fn simulate_step(_action: &Value) -> (Value, f64, bool, bool) {
         // In real implementation, this would call wasmrl-runtime
         let observation = json!([0.1, 0.2, 0.3, 0.4]);
         let reward = 1.0;
@@ -548,8 +551,8 @@ mod tests {
 
     #[test]
     fn test_mcp_tool_creation() {
-        let tool = McpTool::new("my_tool", "Does something useful")
-            .with_schema(json!({"type": "object"}));
+        let tool =
+            McpTool::new("my_tool", "Does something useful").with_schema(json!({"type": "object"}));
         assert_eq!(tool.name, "my_tool");
         assert_eq!(tool.description, "Does something useful");
     }
@@ -595,14 +598,19 @@ mod tests {
         // Create session
         let create_result = bridge.call_tool("env_create", json!({}));
         assert!(create_result.is_ok);
-        let session_id = create_result.data.unwrap()["session_id"].as_str().unwrap().to_string();
+        let session_id = create_result.data.unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         // Reset session
-        let reset_result = bridge.call_tool("env_reset", json!({"session_id": session_id, "seed": 123}));
+        let reset_result =
+            bridge.call_tool("env_reset", json!({"session_id": session_id, "seed": 123}));
         assert!(reset_result.is_ok);
 
         // Step session
-        let step_result = bridge.call_tool("env_step", json!({"session_id": session_id, "action": 1}));
+        let step_result =
+            bridge.call_tool("env_step", json!({"session_id": session_id, "action": 1}));
         assert!(step_result.is_ok);
         let step_data = step_result.data.unwrap();
         assert!(step_data.get("observation").is_some());

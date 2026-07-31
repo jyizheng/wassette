@@ -256,6 +256,16 @@ impl SnapshotCache {
         self.entries.is_empty()
     }
 
+    /// Get current cached data size in bytes.
+    pub fn current_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// Calculate cache hit rate.
+    pub fn hit_rate(&self) -> f64 {
+        self.stats().hit_rate()
+    }
+
     /// Check if we need to evict before adding an entry of given size.
     fn should_evict(&self, new_size: usize) -> bool {
         if self.entries.len() >= self.capacity {
@@ -375,10 +385,7 @@ impl SharedSnapshotCache {
 
     /// Check if key exists.
     pub fn contains(&self, key: &SnapshotKey) -> bool {
-        self.inner
-            .read()
-            .map(|c| c.contains(key))
-            .unwrap_or(false)
+        self.inner.read().map(|c| c.contains(key)).unwrap_or(false)
     }
 
     /// Remove a snapshot.
@@ -388,10 +395,27 @@ impl SharedSnapshotCache {
 
     /// Get stats.
     pub fn stats(&self) -> CacheStats {
-        self.inner
-            .read()
-            .map(|c| c.stats())
-            .unwrap_or_default()
+        self.inner.read().map(|c| c.stats()).unwrap_or_default()
+    }
+
+    /// Get number of entries.
+    pub fn len(&self) -> usize {
+        self.stats().entries
+    }
+
+    /// Check if cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Get current cached data size in bytes.
+    pub fn current_bytes(&self) -> usize {
+        self.stats().total_bytes
+    }
+
+    /// Calculate cache hit rate.
+    pub fn hit_rate(&self) -> f64 {
+        self.stats().hit_rate()
     }
 
     /// Clear the cache.

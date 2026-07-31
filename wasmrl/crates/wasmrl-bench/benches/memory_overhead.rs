@@ -5,12 +5,14 @@
 //!
 //! Measures memory usage characteristics of the WasmRL runtime.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::time::Duration;
+
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use wasmrl_runtime::{EnvConfig, EnvFactory, WasmEnvInstance};
 use wasmrl_wit::{DType, Tensor};
 
-const COUNTER_ENV_PATH: &str = "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
+const COUNTER_ENV_PATH: &str =
+    "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
 
 /// Create a simple action tensor.
 fn make_action(value: i32) -> Tensor {
@@ -34,18 +36,14 @@ fn bench_instance_creation(c: &mut Criterion) {
 
     for num_envs in [1, 4, 16, 64] {
         group.throughput(Throughput::Elements(num_envs as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_envs),
-            &num_envs,
-            |b, &n| {
-                b.iter(|| {
-                    let instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
-                        .map(|_| factory.create(&component_bytes, &config).unwrap())
-                        .collect();
-                    black_box(instances);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(num_envs), &num_envs, |b, &n| {
+            b.iter(|| {
+                let instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
+                    .map(|_| factory.create(&component_bytes, &config).unwrap())
+                    .collect();
+                black_box(instances);
+            });
+        });
     }
 
     group.finish();
@@ -73,10 +71,7 @@ fn bench_snapshot_memory(c: &mut Criterion) {
 
     // Initial state snapshot
     let initial_snapshot = instance.snapshot().unwrap();
-    println!(
-        "Initial snapshot size: {} bytes",
-        initial_snapshot.len()
-    );
+    println!("Initial snapshot size: {} bytes", initial_snapshot.len());
 
     // After some steps
     for _ in 0..10 {
@@ -154,11 +149,7 @@ fn bench_batch_tensor_ops(c: &mut Criterion) {
                     // Simulate batch action creation
                     let actions: Vec<Tensor> = (0..n)
                         .map(|i| {
-                            Tensor::new(
-                                DType::Int32,
-                                vec![1],
-                                (i as i32).to_le_bytes().to_vec(),
-                            )
+                            Tensor::new(DType::Int32, vec![1], (i as i32).to_le_bytes().to_vec())
                         })
                         .collect();
                     black_box(actions);
@@ -179,36 +170,29 @@ fn bench_observation_stacking(c: &mut Criterion) {
 
     for num_envs in [1, 8, 32, 128, 512] {
         group.throughput(Throughput::Elements((num_envs * OBS_DIM) as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_envs),
-            &num_envs,
-            |b, &n| {
-                // Pre-create observations
-                let observations: Vec<Tensor> = (0..n)
-                    .map(|_| {
-                        let data: Vec<u8> = (0..OBS_DIM)
-                            .flat_map(|i| (i as f32).to_le_bytes())
-                            .collect();
-                        Tensor::new(DType::Float32, vec![OBS_DIM as u32], data)
-                    })
-                    .collect();
+        group.bench_with_input(BenchmarkId::from_parameter(num_envs), &num_envs, |b, &n| {
+            // Pre-create observations
+            let observations: Vec<Tensor> = (0..n)
+                .map(|_| {
+                    let data: Vec<u8> = (0..OBS_DIM)
+                        .flat_map(|i| (i as f32).to_le_bytes())
+                        .collect();
+                    Tensor::new(DType::Float32, vec![OBS_DIM as u32], data)
+                })
+                .collect();
 
-                b.iter(|| {
-                    // Stack observations into single batch
-                    let total_size = n * OBS_DIM * 4; // f32 = 4 bytes
-                    let mut stacked_data = Vec::with_capacity(total_size);
-                    for obs in &observations {
-                        stacked_data.extend_from_slice(&obs.data);
-                    }
-                    let stacked = Tensor::new(
-                        DType::Float32,
-                        vec![n as u32, OBS_DIM as u32],
-                        stacked_data,
-                    );
-                    black_box(stacked);
-                });
-            },
-        );
+            b.iter(|| {
+                // Stack observations into single batch
+                let total_size = n * OBS_DIM * 4; // f32 = 4 bytes
+                let mut stacked_data = Vec::with_capacity(total_size);
+                for obs in &observations {
+                    stacked_data.extend_from_slice(&obs.data);
+                }
+                let stacked =
+                    Tensor::new(DType::Float32, vec![n as u32, OBS_DIM as u32], stacked_data);
+                black_box(stacked);
+            });
+        });
     }
 
     group.finish();

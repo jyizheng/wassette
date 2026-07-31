@@ -4,6 +4,7 @@
 //! Error types for the MCP bridge.
 
 use std::fmt;
+
 use thiserror::Error;
 
 /// Result type alias for bridge operations.
@@ -154,9 +155,7 @@ impl BridgeError {
     pub fn is_recoverable(&self) -> bool {
         matches!(
             self,
-            Self::InvalidAction { .. }
-                | Self::Timeout { .. }
-                | Self::SerializationError { .. }
+            Self::InvalidAction { .. } | Self::Timeout { .. } | Self::SerializationError { .. }
         )
     }
 

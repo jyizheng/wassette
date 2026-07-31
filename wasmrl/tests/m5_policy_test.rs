@@ -6,6 +6,7 @@
 //! This test suite validates the policy schema, parsing, enforcement, and telemetry.
 
 use std::time::Duration;
+
 use wasmrl_policy::{
     BudgetEnforcer, BudgetOverrun, BudgetType, CapabilityConfig, CapabilityDenial,
     EnforcementAction, EnforcementResult, FuelBudget, MemoryLimit, Policy, PolicyBuilder,
@@ -196,15 +197,11 @@ fn test_policy_builder_complete() {
 #[test]
 fn test_policy_builder_validated() {
     // Valid policy should work
-    let result = PolicyBuilder::new()
-        .max_memory_mb(64)
-        .build_validated();
+    let result = PolicyBuilder::new().max_memory_mb(64).build_validated();
     assert!(result.is_ok());
 
     // Invalid should fail
-    let result = PolicyBuilder::new()
-        .max_memory_mb(0)
-        .build_validated();
+    let result = PolicyBuilder::new().max_memory_mb(0).build_validated();
     assert!(result.is_err());
 }
 
@@ -214,9 +211,7 @@ fn test_policy_builder_validated() {
 
 #[test]
 fn test_enforcer_memory_enforcement() {
-    let policy = PolicyBuilder::new()
-        .max_memory_mb(64)
-        .build();
+    let policy = PolicyBuilder::new().max_memory_mb(64).build();
     let enforcer = BudgetEnforcer::new(policy);
 
     // Within limit
@@ -238,9 +233,7 @@ fn test_enforcer_memory_enforcement() {
 
 #[test]
 fn test_enforcer_fuel_tracking() {
-    let policy = PolicyBuilder::new()
-        .fuel_per_step(1_000_000)
-        .build();
+    let policy = PolicyBuilder::new().fuel_per_step(1_000_000).build();
     let enforcer = BudgetEnforcer::new(policy);
 
     // Record fuel usage
@@ -281,9 +274,7 @@ fn test_enforcer_capability_checks() {
 
 #[test]
 fn test_enforcer_network_allowed() {
-    let policy = PolicyBuilder::new()
-        .allow_network()
-        .build();
+    let policy = PolicyBuilder::new().allow_network().build();
     let enforcer = BudgetEnforcer::new(policy);
 
     assert!(enforcer.check_network().is_allowed());
@@ -291,9 +282,7 @@ fn test_enforcer_network_allowed() {
 
 #[test]
 fn test_enforcer_timed_operations() {
-    let policy = PolicyBuilder::new()
-        .timeout_step_ms(100)
-        .build();
+    let policy = PolicyBuilder::new().timeout_step_ms(100).build();
     let enforcer = BudgetEnforcer::new(policy);
 
     // Start a timed operation
@@ -367,7 +356,12 @@ fn test_telemetry_budget_overruns() {
     let collector = TelemetryCollector::new();
 
     collector.record_budget_overrun(BudgetType::Fuel, 1_000_000, 1_500_000, "step");
-    collector.record_budget_overrun(BudgetType::Memory, 64 * 1024 * 1024, 128 * 1024 * 1024, "alloc");
+    collector.record_budget_overrun(
+        BudgetType::Memory,
+        64 * 1024 * 1024,
+        128 * 1024 * 1024,
+        "alloc",
+    );
     collector.record_budget_overrun(BudgetType::Timeout, 100, 150, "step");
 
     let snapshot = collector.snapshot();
@@ -471,9 +465,7 @@ fn test_telemetry_reset() {
 #[test]
 fn test_security_fuel_exhaustion_simulation() {
     // Simulate a malicious loop that exhausts fuel budget
-    let policy = PolicyBuilder::new()
-        .fuel_per_step(1_000_000)
-        .build();
+    let policy = PolicyBuilder::new().fuel_per_step(1_000_000).build();
     let enforcer = BudgetEnforcer::new(policy);
     let collector = TelemetryCollector::new();
 
@@ -483,7 +475,10 @@ fn test_security_fuel_exhaustion_simulation() {
 
     let result = enforcer.check_fuel("step");
     if let EnforcementResult::Exceeded(action) = result {
-        if let EnforcementAction::FuelExhausted { consumed, budget, .. } = action {
+        if let EnforcementAction::FuelExhausted {
+            consumed, budget, ..
+        } = action
+        {
             collector.record_budget_overrun(BudgetType::Fuel, budget, consumed, "step");
         }
     }
@@ -495,9 +490,7 @@ fn test_security_fuel_exhaustion_simulation() {
 #[test]
 fn test_security_memory_bomb_simulation() {
     // Simulate a malicious memory allocation
-    let policy = PolicyBuilder::new()
-        .max_memory_mb(64)
-        .build();
+    let policy = PolicyBuilder::new().max_memory_mb(64).build();
     let enforcer = BudgetEnforcer::new(policy);
     let collector = TelemetryCollector::new();
 

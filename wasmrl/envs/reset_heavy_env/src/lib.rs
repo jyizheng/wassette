@@ -24,7 +24,7 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use wasmrl_sdk_rust::{DeterministicRng, SnapshotHelper, TensorEncoder};
+use wasmrl_sdk_rust::DeterministicRng;
 use wasmrl_wit::{DType, EnvConfig, EnvHandle, SnapshotData, StepResult, Tensor};
 
 /// Environment configuration.
@@ -188,13 +188,12 @@ impl ResetHeavyEnv {
 
     /// Initialize from EnvConfig.
     pub fn init(env_config: &EnvConfig) -> anyhow::Result<Self> {
-        let config: ResetHeavyConfig = if env_config.config_json.is_empty()
-            || env_config.config_json == "{}"
-        {
-            ResetHeavyConfig::default()
-        } else {
-            serde_json::from_str(&env_config.config_json)?
-        };
+        let config: ResetHeavyConfig =
+            if env_config.config_json.is_empty() || env_config.config_json == "{}" {
+                ResetHeavyConfig::default()
+            } else {
+                serde_json::from_str(&env_config.config_json)?
+            };
 
         Ok(Self::new(config))
     }
@@ -253,56 +252,71 @@ impl ResetHeavyEnv {
 
     /// Execute one step.
     pub fn step(&mut self, action: &Tensor) -> anyhow::Result<StepResult> {
-        let state = self
-            .state
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Environment not reset"))?;
+        let (reward, terminated, truncated, steps, distance) = {
+            let state = self
+                .state
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("Environment not reset"))?;
 
-        // Decode action
-        let action_value = if action.data.len() >= 4 {
-            i32::from_le_bytes([action.data[0], action.data[1], action.data[2], action.data[3]])
-        } else {
-            0
-        };
+            // Decode action
+            let action_value = if action.data.len() >= 4 {
+                i32::from_le_bytes([
+                    action.data[0],
+                    action.data[1],
+                    action.data[2],
+                    action.data[3],
+                ])
+            } else {
+                0
+            };
 
-        // Calculate new position
-        let (new_x, new_y) = match action_value {
-            0 => (state.agent_x, state.agent_y.saturating_sub(1)), // Up
-            1 => (state.agent_x, (state.agent_y + 1).min(state.grid_size - 1)), // Down
-            2 => (state.agent_x.saturating_sub(1), state.agent_y), // Left
-            3 => ((state.agent_x + 1).min(state.grid_size - 1), state.agent_y), // Right
-            _ => (state.agent_x, state.agent_y),                   // No-op
-        };
+            // Calculate new position
+            let (new_x, new_y) = match action_value {
+                0 => (state.agent_x, state.agent_y.saturating_sub(1)), // Up
+                1 => (state.agent_x, (state.agent_y + 1).min(state.grid_size - 1)), // Down
+                2 => (state.agent_x.saturating_sub(1), state.agent_y), // Left
+                3 => ((state.agent_x + 1).min(state.grid_size - 1), state.agent_y), // Right
+                _ => (state.agent_x, state.agent_y),                   // No-op
+            };
 
-        // Check if move is valid
-        let mut reward = -0.1; // Step penalty
+            // Check if move is valid
+            let mut reward = -0.1; // Step penalty
 
-        if state.is_passable(new_x, new_y) {
-            // Clear old position
-            state.set_cell(state.agent_x, state.agent_y, Cell::Empty);
+            if state.is_passable(new_x, new_y) {
+                // Clear old position
+                state.set_cell(state.agent_x, state.agent_y, Cell::Empty);
 
-            // Update position
-            state.agent_x = new_x;
-            state.agent_y = new_y;
+                // Update position
+                state.agent_x = new_x;
+                state.agent_y = new_y;
 
-            // Mark new position (unless it's the goal)
-            if !state.at_goal() {
-                state.set_cell(new_x, new_y, Cell::Agent);
+                // Mark new position (unless it's the goal)
+                if !state.at_goal() {
+                    state.set_cell(new_x, new_y, Cell::Agent);
+                }
+            } else {
+                // Hit obstacle
+                reward = -1.0;
             }
-        } else {
-            // Hit obstacle
-            reward = -1.0;
-        }
 
-        state.steps += 1;
+            state.steps += 1;
 
-        // Check termination
-        let terminated = state.at_goal();
-        let truncated = state.steps >= state.max_steps;
+            // Check termination
+            let terminated = state.at_goal();
+            let truncated = state.steps >= state.max_steps;
 
-        if terminated {
-            reward = 10.0;
-        }
+            if terminated {
+                reward = 10.0;
+            }
+
+            (
+                reward,
+                terminated,
+                truncated,
+                state.steps,
+                state.distance_to_goal(),
+            )
+        };
 
         let obs = self.get_observation();
 
@@ -313,8 +327,7 @@ impl ResetHeavyEnv {
             truncated,
             info: Some(format!(
                 "{{\"steps\": {}, \"distance\": {:.2}}}",
-                state.steps,
-                state.distance_to_goal()
+                steps, distance
             )),
         })
     }

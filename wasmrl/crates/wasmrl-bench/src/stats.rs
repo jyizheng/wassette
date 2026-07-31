@@ -85,8 +85,8 @@ impl RunningStats {
 
         let combined_count = self.count + other.count;
         let delta = other.mean - self.mean;
-        let combined_mean =
-            (self.count as f64 * self.mean + other.count as f64 * other.mean) / combined_count as f64;
+        let combined_mean = (self.count as f64 * self.mean + other.count as f64 * other.mean)
+            / combined_count as f64;
         let combined_m2 = self.m2
             + other.m2
             + delta * delta * (self.count * other.count) as f64 / combined_count as f64;
@@ -294,12 +294,12 @@ mod tests {
     #[test]
     fn test_histogram() {
         let mut hist = Histogram::new(0.0, 100.0, 10);
-        
+
         // All in first bucket
         for _ in 0..10 {
             hist.push(5.0);
         }
-        
+
         assert_eq!(hist.buckets()[0], 10);
         assert!(hist.percentile(50.0) < 15.0);
     }
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn test_comparison() {
         let cmp = Comparison::new("scalar", 100.0, "batch", 50.0, 1.5);
-        
+
         assert!((cmp.speedup - 2.0).abs() < 0.001);
         assert!(cmp.meets_target);
     }
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn test_comparison_not_meeting_target() {
         let cmp = Comparison::new("scalar", 100.0, "batch", 90.0, 2.0);
-        
+
         assert!(!cmp.meets_target);
     }
 

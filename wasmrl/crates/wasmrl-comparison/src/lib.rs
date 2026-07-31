@@ -48,17 +48,17 @@ mod backend;
 mod config;
 mod error;
 mod metrics;
-mod runner;
 mod report;
+mod runner;
 mod tasks;
 
 // Re-export main types
 pub use backend::{Backend, BackendRunner, DockerBackend, SubprocessBackend, WasmBackend};
-pub use config::{ComparisonConfig, TaskConfig, HardwareConfig};
+pub use config::{ComparisonConfig, HardwareConfig, TaskConfig};
 pub use error::{ComparisonError, ComparisonResult};
-pub use metrics::{ComparisonMetrics, BackendMetrics, ScalingMetrics};
+pub use metrics::{BackendMetrics, ComparisonMetrics, ScalingMetrics};
+pub use report::{ReportFormat, ReportGenerator};
 pub use runner::{ComparisonRunner, RunResult};
-pub use report::{ReportGenerator, ReportFormat};
 pub use tasks::{Task, TaskRegistry, TaskVerifier};
 
 #[cfg(test)]

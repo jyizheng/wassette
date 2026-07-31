@@ -36,8 +36,9 @@
 
 #![warn(missing_docs)]
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
 
 /// WIT interface version for tracking ABI compatibility.
 pub const WIT_VERSION: &str = "0.1.0";
@@ -328,11 +329,7 @@ pub trait WasmRLEnvironment {
 /// Optional batch operations trait.
 pub trait WasmRLBatch: WasmRLEnvironment {
     /// Reset multiple environments in batch.
-    fn reset_batch(
-        &mut self,
-        handles: &[EnvHandle],
-        seeds: &[u64],
-    ) -> anyhow::Result<Vec<Tensor>>;
+    fn reset_batch(&mut self, handles: &[EnvHandle], seeds: &[u64]) -> anyhow::Result<Vec<Tensor>>;
 
     /// Step multiple environments in batch.
     fn step_batch(
@@ -418,13 +415,13 @@ mod tests {
     #[test]
     fn test_step_result_done() {
         let obs = Tensor::zeros(DType::Float32, vec![4]);
-        
+
         let result1 = StepResult::new(obs.clone(), 1.0, true, false);
         assert!(result1.done());
-        
+
         let result2 = StepResult::new(obs.clone(), 1.0, false, true);
         assert!(result2.done());
-        
+
         let result3 = StepResult::new(obs, 1.0, false, false);
         assert!(!result3.done());
     }
@@ -433,7 +430,7 @@ mod tests {
     fn test_env_config() {
         let config = EnvConfig::new(r#"{"max_steps": 1000}"#);
         assert!(config.config_json.contains("max_steps"));
-        
+
         let empty = EnvConfig::empty();
         assert_eq!(empty.config_json, "{}");
     }
@@ -456,12 +453,14 @@ mod tests {
     #[test]
     fn test_batch_step_result() {
         let mut result = BatchStepResult::with_capacity(3);
-        result.observations.push(Tensor::zeros(DType::Float32, vec![4]));
+        result
+            .observations
+            .push(Tensor::zeros(DType::Float32, vec![4]));
         result.rewards.push(1.0);
         result.terminated.push(false);
         result.truncated.push(false);
         result.infos.push(None);
-        
+
         assert_eq!(result.len(), 1);
         assert!(!result.is_empty());
         assert!(result.is_valid());
@@ -476,4 +475,3 @@ mod tests {
         assert!(!result.is_valid());
     }
 }
-

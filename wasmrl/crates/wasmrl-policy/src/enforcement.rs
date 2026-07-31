@@ -3,10 +3,11 @@
 
 //! Budget enforcement for WasmRL environments.
 
-use crate::{Policy, PolicyError, PolicyResult};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use crate::{Policy, PolicyError, PolicyResult};
 
 /// Result of an enforcement check.
 #[derive(Debug, Clone)]
@@ -94,12 +95,15 @@ impl EnforcementAction {
                 operation,
                 elapsed,
                 limit,
-            } => {
-                PolicyError::timeout_exceeded(operation, elapsed.as_millis() as u64, limit.as_millis() as u64)
-            }
-            Self::MemoryExceeded { current, limit } => {
-                PolicyError::memory_exceeded((*current / (1024 * 1024)) as u32, (*limit / (1024 * 1024)) as u32)
-            }
+            } => PolicyError::timeout_exceeded(
+                operation,
+                elapsed.as_millis() as u64,
+                limit.as_millis() as u64,
+            ),
+            Self::MemoryExceeded { current, limit } => PolicyError::memory_exceeded(
+                (*current / (1024 * 1024)) as u32,
+                (*limit / (1024 * 1024)) as u32,
+            ),
             Self::CapabilityDenied { capability, .. } => PolicyError::capability_denied(capability),
             Self::Trap { message } => PolicyError::EnforcementError(format!("Trap: {}", message)),
         }
@@ -178,7 +182,8 @@ impl BudgetEnforcer {
 
     /// Get remaining time until deadline.
     pub fn remaining_time(&self) -> Option<Duration> {
-        self.deadline.map(|d| d.saturating_duration_since(Instant::now()))
+        self.deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
     }
 
     // =========================================================================

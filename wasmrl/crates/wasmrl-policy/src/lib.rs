@@ -87,7 +87,8 @@ pub use schema::{
     CapabilityConfig, FuelBudget, MemoryLimit, Policy, PolicyBuilder, TimeoutConfig, WasiConfig,
 };
 pub use telemetry::{
-    BudgetOverrun, CapabilityDenial, PolicyEvent, PolicyTelemetry, TelemetryCollector, TrapInfo,
+    BudgetOverrun, BudgetType, CapabilityDenial, PolicyEvent, PolicyTelemetry, TelemetryCollector,
+    TrapInfo,
 };
 
 #[cfg(test)]

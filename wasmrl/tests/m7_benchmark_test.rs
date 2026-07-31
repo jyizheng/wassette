@@ -5,9 +5,10 @@
 //!
 //! Unit tests for benchmark utilities and statistics.
 
+use std::time::Duration;
+
 use wasmrl_bench::stats::{BenchmarkResults, Comparison, Histogram, RunningStats};
 use wasmrl_bench::{measure, measure_with_warmup, BenchConfig, Timer, TimingResult};
-use std::time::Duration;
 
 // ============================================================================
 // TimingResult Tests
@@ -345,7 +346,13 @@ fn test_fast_reset_speedup_target() {
     let full_reset_time = 1000.0; // microseconds
     let fast_reset_time = 400.0; // Must be <= 500 for 2x
 
-    let cmp = Comparison::new("full_reset", full_reset_time, "fast_reset", fast_reset_time, 2.0);
+    let cmp = Comparison::new(
+        "full_reset",
+        full_reset_time,
+        "fast_reset",
+        fast_reset_time,
+        2.0,
+    );
     assert!(
         cmp.meets_target,
         "Fast reset should be at least 2x faster than full reset"
@@ -380,11 +387,11 @@ fn test_timing_percentiles() {
     }
 
     let result = TimingResult::from_durations(durations);
-    
+
     // p50 should be around 50µs
     assert!(result.p50 >= Duration::from_micros(49));
     assert!(result.p50 <= Duration::from_micros(51));
-    
+
     // p99 should be around 99µs
     assert!(result.p99 >= Duration::from_micros(98));
 }

@@ -27,7 +27,7 @@ fn test_wasmrl_runtime_available() {
     // Verify wasmrl-runtime is available
     let config = wasmrl_runtime::RuntimeConfig::new();
     assert_eq!(config.max_instances, 256);
-    assert_eq!(config.max_memory_mb, 512);
+    assert_eq!(config.max_memory_bytes, 512 * 1024 * 1024);
 }
 
 #[test]
@@ -98,8 +98,12 @@ fn test_batch_step_result_validation() {
     let mut batch = BatchStepResult::with_capacity(2);
 
     // Add two complete results
-    batch.observations.push(Tensor::zeros(DType::Float32, vec![4]));
-    batch.observations.push(Tensor::zeros(DType::Float32, vec![4]));
+    batch
+        .observations
+        .push(Tensor::zeros(DType::Float32, vec![4]));
+    batch
+        .observations
+        .push(Tensor::zeros(DType::Float32, vec![4]));
     batch.rewards.push(1.0);
     batch.rewards.push(2.0);
     batch.terminated.push(false);
@@ -261,4 +265,3 @@ fn test_malicious_memory_env_controlled_alloc() {
     let result = env.step(&action);
     assert!(result.is_ok());
 }
-

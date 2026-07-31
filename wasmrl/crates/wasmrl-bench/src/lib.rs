@@ -392,13 +392,13 @@ where
     F: FnMut(),
 {
     let mut durations = Vec::with_capacity(iterations);
-    
+
     for _ in 0..iterations {
         let start = Instant::now();
         f();
         durations.push(start.elapsed());
     }
-    
+
     TimingResult::from_durations(durations)
 }
 
@@ -411,7 +411,7 @@ where
     for _ in 0..warmup {
         f();
     }
-    
+
     // Measure
     measure(iterations, f)
 }
@@ -427,7 +427,10 @@ mod tests {
 
     #[test]
     fn test_bench_mode_parse() {
-        assert_eq!("wasm_inproc".parse::<BenchMode>().unwrap(), BenchMode::WasmInproc);
+        assert_eq!(
+            "wasm_inproc".parse::<BenchMode>().unwrap(),
+            BenchMode::WasmInproc
+        );
         assert_eq!("mcp_tool".parse::<BenchMode>().unwrap(), BenchMode::McpTool);
         assert_eq!("mcp".parse::<BenchMode>().unwrap(), BenchMode::McpTool);
         assert_eq!("native".parse::<BenchMode>().unwrap(), BenchMode::Native);
@@ -488,12 +491,8 @@ mod tests {
             samples: 100,
         };
 
-        let comparison = ModeComparison::new(
-            BenchMode::WasmInproc,
-            BenchMode::McpTool,
-            &inproc,
-            &mcp,
-        );
+        let comparison =
+            ModeComparison::new(BenchMode::WasmInproc, BenchMode::McpTool, &inproc, &mcp);
 
         assert_eq!(comparison.baseline_mean_us, 100);
         assert_eq!(comparison.compare_mean_us, 1000);
@@ -527,13 +526,13 @@ mod tests {
     #[test]
     fn test_timer() {
         let mut timer = Timer::new();
-        
+
         for _ in 0..5 {
             timer.start();
             std::thread::sleep(Duration::from_micros(100));
             timer.stop();
         }
-        
+
         let result = timer.result();
         assert_eq!(result.samples, 5);
         assert!(result.min >= Duration::from_micros(100));
@@ -544,7 +543,7 @@ mod tests {
         let result = measure(10, || {
             std::thread::sleep(Duration::from_micros(50));
         });
-        
+
         assert_eq!(result.samples, 10);
     }
 
@@ -559,7 +558,7 @@ mod tests {
             p99: Duration::ZERO,
             samples: 1,
         };
-        
+
         // 10ms per iter with 100 ops = 10,000 ops/sec
         let throughput = result.throughput(100);
         assert!((throughput - 10000.0).abs() < 100.0);

@@ -6,13 +6,15 @@
 //! Measures the throughput of step operations in both scalar and batch modes.
 //! Target: batch_step >= 1.2x scalar loop at N >= 256
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::time::Duration;
+
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use wasmrl_runtime::{EnvConfig, EnvFactory, EnvPool, EnvPoolConfig, WasmEnvInstance};
 use wasmrl_wit::{DType, Tensor};
 
 /// Path to the counter environment component.
-const COUNTER_ENV_PATH: &str = "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
+const COUNTER_ENV_PATH: &str =
+    "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
 
 /// Create a simple action tensor.
 fn make_action(value: i32) -> Tensor {
@@ -27,7 +29,10 @@ fn bench_scalar_step_loop(c: &mut Criterion) {
     // Check if component exists
     let component_path = std::path::Path::new(COUNTER_ENV_PATH);
     if !component_path.exists() {
-        eprintln!("Counter env not found at {:?}, skipping benchmark", component_path);
+        eprintln!(
+            "Counter env not found at {:?}, skipping benchmark",
+            component_path
+        );
         return;
     }
 
@@ -37,31 +42,27 @@ fn bench_scalar_step_loop(c: &mut Criterion) {
 
     for num_envs in [1, 4, 16, 64, 256] {
         group.throughput(Throughput::Elements(num_envs as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_envs),
-            &num_envs,
-            |b, &n| {
-                // Create instances
-                let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
-                    .map(|_| factory.create(&component_bytes, &config).unwrap())
-                    .collect();
+        group.bench_with_input(BenchmarkId::from_parameter(num_envs), &num_envs, |b, &n| {
+            // Create instances
+            let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
+                .map(|_| factory.create(&component_bytes, &config).unwrap())
+                .collect();
 
-                // Initialize all
+            // Initialize all
+            for instance in &mut instances {
+                instance.init().unwrap();
+            }
+
+            let action = make_action(1); // increment
+
+            b.iter(|| {
+                // Scalar loop: step each instance sequentially
                 for instance in &mut instances {
-                    instance.init().unwrap();
+                    let result = instance.step(black_box(&action)).unwrap();
+                    black_box(result);
                 }
-
-                let action = make_action(1); // increment
-
-                b.iter(|| {
-                    // Scalar loop: step each instance sequentially
-                    for instance in &mut instances {
-                        let result = instance.step(black_box(&action)).unwrap();
-                        black_box(result);
-                    }
-                });
-            },
-        );
+            });
+        });
     }
 
     group.finish();
@@ -84,40 +85,36 @@ fn bench_batch_step(c: &mut Criterion) {
 
     for num_envs in [1, 4, 16, 64, 256] {
         group.throughput(Throughput::Elements(num_envs as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_envs),
-            &num_envs,
-            |b, &n| {
-                // Create pool
-                let pool_config = EnvPoolConfig {
-                    num_envs: n,
-                    max_memory_per_env: 64 * 1024 * 1024,
-                    enable_snapshots: false,
-                    auto_reset: false,
-                };
+        group.bench_with_input(BenchmarkId::from_parameter(num_envs), &num_envs, |b, &n| {
+            // Create pool
+            let pool_config = EnvPoolConfig {
+                num_envs: n,
+                max_memory_per_env: 64 * 1024 * 1024,
+                enable_snapshots: false,
+                auto_reset: false,
+            };
 
-                let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
-                    .map(|_| factory.create(&component_bytes, &config).unwrap())
+            let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
+                .map(|_| factory.create(&component_bytes, &config).unwrap())
+                .collect();
+
+            // Initialize all
+            for instance in &mut instances {
+                instance.init().unwrap();
+            }
+
+            let actions: Vec<Tensor> = (0..n).map(|_| make_action(1)).collect();
+
+            b.iter(|| {
+                // Batch step: step all instances (in this impl, still sequential but structure ready for parallel)
+                let results: Vec<_> = instances
+                    .iter_mut()
+                    .zip(actions.iter())
+                    .map(|(inst, action)| inst.step(black_box(action)).unwrap())
                     .collect();
-
-                // Initialize all
-                for instance in &mut instances {
-                    instance.init().unwrap();
-                }
-
-                let actions: Vec<Tensor> = (0..n).map(|_| make_action(1)).collect();
-
-                b.iter(|| {
-                    // Batch step: step all instances (in this impl, still sequential but structure ready for parallel)
-                    let results: Vec<_> = instances
-                        .iter_mut()
-                        .zip(actions.iter())
-                        .map(|(inst, action)| inst.step(black_box(action)).unwrap())
-                        .collect();
-                    black_box(results);
-                });
-            },
-        );
+                black_box(results);
+            });
+        });
     }
 
     group.finish();

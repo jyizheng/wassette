@@ -122,15 +122,23 @@ impl FastResetMetrics {
             self.fast_resets as f64 / total as f64
         }
     }
+
+    /// Average full reset latency.
+    pub fn avg_full_reset_time(&self) -> Duration {
+        self.full_reset_latency.mean()
+    }
+
+    /// Average cached reset latency.
+    pub fn avg_fast_reset_time(&self) -> Duration {
+        self.fast_reset_latency.mean()
+    }
 }
 
 impl FastResetManager {
     /// Create a new fast reset manager.
     pub fn new(config: FastResetConfig) -> Self {
-        let cache = SharedSnapshotCache::with_byte_limit(
-            config.cache_capacity,
-            config.cache_max_bytes,
-        );
+        let cache =
+            SharedSnapshotCache::with_byte_limit(config.cache_capacity, config.cache_max_bytes);
 
         Self {
             config,
@@ -185,6 +193,16 @@ impl FastResetManager {
 
         self.cache.put(key, snapshot);
         self.metrics.snapshots_cached += 1;
+    }
+
+    /// Cache raw initial state bytes for future fast resets.
+    pub fn cache_initial_state(&mut self, key: &SnapshotKey, state: Vec<u8>) {
+        self.cache_snapshot(key.clone(), SnapshotData::new(state));
+    }
+
+    /// Get raw cached state bytes for a fast reset.
+    pub fn get_cached_state(&mut self, key: &SnapshotKey) -> Option<Vec<u8>> {
+        self.get_cached(key).map(|snapshot| snapshot.data)
     }
 
     /// Check if a snapshot is cached.
@@ -249,8 +267,9 @@ impl ResetResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wasmrl_wit::DType;
+
+    use super::*;
 
     #[test]
     fn test_fast_reset_config_default() {

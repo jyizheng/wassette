@@ -73,7 +73,10 @@ impl SessionState {
 
     /// Check if the session can be reset.
     pub fn can_reset(&self) -> bool {
-        matches!(self, Self::Created | Self::Ready | Self::Terminated | Self::Error)
+        matches!(
+            self,
+            Self::Created | Self::Ready | Self::Terminated | Self::Error
+        )
     }
 
     /// Check if the session is active (not closed).
@@ -293,7 +296,10 @@ impl SessionManager {
 
     /// Get the number of active sessions.
     pub fn active_count(&self) -> usize {
-        self.sessions.values().filter(|s| s.state.is_active()).count()
+        self.sessions
+            .values()
+            .filter(|s| s.state.is_active())
+            .count()
     }
 
     /// Get manager statistics.
@@ -446,7 +452,10 @@ mod tests {
         manager.create_session(SessionConfig::new()).unwrap();
 
         let result = manager.create_session(SessionConfig::new());
-        assert!(matches!(result, Err(BridgeError::MaxSessionsExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(BridgeError::MaxSessionsExceeded { .. })
+        ));
     }
 
     #[test]
@@ -475,9 +484,7 @@ mod tests {
         let manager = SharedSessionManager::new(4);
         let id = manager.create_session(SessionConfig::new()).unwrap();
 
-        let info = manager
-            .with_session(&id, |session| session.info())
-            .unwrap();
+        let info = manager.with_session(&id, |session| session.info()).unwrap();
         assert!(info.get("session_id").is_some());
     }
 

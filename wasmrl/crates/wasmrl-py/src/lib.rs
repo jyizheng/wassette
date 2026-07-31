@@ -45,11 +45,10 @@ mod spaces;
 mod tensor;
 mod vecenv;
 
-use pyo3::prelude::*;
-
 pub use config::PyEnvConfig;
 pub use env::PyWasmEnv;
 pub use error::PyWasmRLError;
+use pyo3::prelude::*;
 pub use spaces::{PyBox, PyDiscrete, PySpace};
 pub use tensor::PyTensor;
 pub use vecenv::PyWasmVecEnv;
@@ -76,8 +75,8 @@ fn wasmrl_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vecenv::list_available_envs, m)?)?;
     m.add_function(wrap_pyfunction!(env::load_component, m)?)?;
 
-    Ok(()
-)}
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

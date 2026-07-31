@@ -233,7 +233,10 @@ impl TaskRegistry {
 
     /// Filter tasks by category.
     pub fn by_category(&self, category: TaskCategory) -> Vec<&Task> {
-        self.tasks.values().filter(|t| t.category == category).collect()
+        self.tasks
+            .values()
+            .filter(|t| t.category == category)
+            .collect()
     }
 
     /// Get task count.
@@ -249,8 +252,23 @@ impl TaskRegistry {
 
 impl Default for TaskRegistry {
     fn default() -> Self {
-        Self::new()
+        let mut registry = Self::with_standard_tasks();
+        registry.register(counter_smoke_task());
+        registry
     }
+}
+
+/// Minimal WasmRL counter smoke task.
+fn counter_smoke_task() -> Task {
+    Task::new("counter", "Counter Smoke")
+        .with_description("Minimal counter environment smoke benchmark")
+        .with_category(TaskCategory::Compute)
+        .with_source(TaskSource::Custom)
+        .with_input(br#"{"action": 1}"#.to_vec())
+        .with_expected(br#"{"counter": 1}"#.to_vec())
+        .with_complexity(1)
+        .with_tag("smoke")
+        .with_tag("wasmrl")
 }
 
 // ============================================================================
@@ -377,7 +395,7 @@ impl TaskVerifier {
             VerificationMethod::JsonSchema(schema) => {
                 // Parse output as JSON
                 let _value: serde_json::Value = serde_json::from_slice(output)
-                    .map_err(|e| ComparisonError::TaskFailed(format!("Invalid JSON: {}", e)))?;
+                    .map_err(|e| ComparisonError::execution(format!("Invalid JSON: {}", e)))?;
 
                 // TODO: Actual schema validation
                 let _ = schema;
@@ -385,9 +403,9 @@ impl TaskVerifier {
             }
             VerificationMethod::Regex(pattern) => {
                 let re = regex::Regex::new(pattern)
-                    .map_err(|e| ComparisonError::ConfigInvalid(format!("Invalid regex: {}", e)))?;
+                    .map_err(|e| ComparisonError::config(format!("Invalid regex: {}", e)))?;
                 let output_str = std::str::from_utf8(output)
-                    .map_err(|e| ComparisonError::TaskFailed(format!("Invalid UTF-8: {}", e)))?;
+                    .map_err(|e| ComparisonError::execution(format!("Invalid UTF-8: {}", e)))?;
                 Ok(re.is_match(output_str))
             }
             VerificationMethod::Custom(_name) => {
@@ -470,8 +488,7 @@ mod tests {
 
     #[test]
     fn test_verifier_output_match() {
-        let task = Task::new("test", "Test")
-            .with_expected(b"hello".to_vec());
+        let task = Task::new("test", "Test").with_expected(b"hello".to_vec());
 
         assert!(TaskVerifier::verify(&task, b"hello").unwrap());
         assert!(!TaskVerifier::verify(&task, b"world").unwrap());

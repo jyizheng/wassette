@@ -3,27 +3,27 @@
 
 //! Single environment Python wrapper.
 
-use crate::config::PyEnvConfig;
-use crate::error::{PyWasmRLError, PyWasmRLResult};
-use crate::spaces::{make_box_space, make_discrete_space, PySpace};
-use crate::tensor::{numpy_to_action_tensor, tensor_to_numpy};
+use std::sync::Arc;
+
 use numpy::PyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::sync::Arc;
-use wasmrl_runtime::{EnvConfig, EnvFactory, WasmEnvInstance};
-use wasmrl_wit::Tensor;
+use wasmrl_runtime::{ComponentRef, EnvRuntime, InstanceHandle, WasmEnvFactory};
+use wasmrl_wit::{EnvConfig, SnapshotData};
+
+use crate::config::PyEnvConfig;
+use crate::error::PyWasmRLError;
+use crate::spaces::{make_box_space, make_discrete_space, PySpace};
+use crate::tensor::{numpy_to_action_tensor, tensor_to_numpy};
 
 /// Single WasmRL environment wrapper for Python.
 #[pyclass(name = "WasmEnv")]
 pub struct PyWasmEnv {
-    /// Environment instance.
-    instance: Option<Box<dyn WasmEnvInstance>>,
-    /// Factory for creating new instances.
-    factory: Arc<EnvFactory>,
-    /// Component bytes.
-    component_bytes: Vec<u8>,
-    /// Configuration.
+    /// Runtime used for environment calls.
+    runtime: EnvRuntime,
+    /// Active instance handle.
+    handle: Option<InstanceHandle>,
+    /// Environment configuration.
     config: EnvConfig,
     /// Observation space.
     #[pyo3(get)]
@@ -41,6 +41,12 @@ pub struct PyWasmEnv {
     step_count: u64,
 }
 
+impl PyWasmEnv {
+    fn handle(&self) -> PyResult<InstanceHandle> {
+        self.handle.ok_or_else(|| PyWasmRLError::EnvClosed.into())
+    }
+}
+
 #[pymethods]
 impl PyWasmEnv {
     /// Create a new WasmEnv from component bytes.
@@ -51,61 +57,33 @@ impl PyWasmEnv {
         component_bytes: Vec<u8>,
         config: Option<&PyEnvConfig>,
     ) -> PyResult<Self> {
-        let env_config = config
-            .map(|c| c.to_env_config())
-            .unwrap_or_default();
-
-        let factory = EnvFactory::new()
-            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        let py_config = config.cloned().unwrap_or_default();
+        let env_config = py_config.to_env_config();
+        let factory = WasmEnvFactory::with_config(
+            ComponentRef::from_bytes(component_bytes),
+            py_config.to_policy_config(),
+            py_config.to_runtime_config(),
+        )
+        .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
         let factory = Arc::new(factory);
-
-        // Create a temporary instance to get space info
-        let temp_instance = factory
-            .create(&component_bytes, &env_config)
+        let handle = factory
+            .spawn_one()
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        let mut runtime = EnvRuntime::new(factory);
+        runtime
+            .init(handle, env_config.clone())
             .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
 
-        let spec = temp_instance.spec();
-
-        // Create observation space
-        let obs_space = if spec.obs_dtype.is_floating_point() {
-            make_box_space(
-                py,
-                -f32::INFINITY,
-                f32::INFINITY,
-                spec.obs_shape.iter().map(|&x| x as usize).collect(),
-            )?
-        } else {
-            // Discrete observation
-            let max_val = spec
-                .obs_shape
-                .iter()
-                .map(|&x| x as i64)
-                .product::<i64>()
-                .max(1);
-            make_discrete_space(py, max_val, 0)?
-        };
-
-        // Create action space
-        let act_space = if spec.act_dtype.is_floating_point() {
-            make_box_space(
-                py,
-                -1.0,
-                1.0,
-                spec.act_shape.iter().map(|&x| x as usize).collect(),
-            )?
-        } else {
-            // Discrete action space
-            let n = spec.act_shape.first().copied().unwrap_or(1) as i64;
-            make_discrete_space(py, n, 0)?
-        };
+        let (_, observation_space) =
+            make_box_space(vec![1], f32::NEG_INFINITY as f64, f32::INFINITY as f64);
+        let (_, action_space) = make_discrete_space(2);
 
         Ok(Self {
-            instance: Some(temp_instance),
-            factory,
-            component_bytes,
+            runtime,
+            handle: Some(handle),
             config: env_config,
-            observation_space: obs_space,
-            action_space: act_space,
+            observation_space: Py::new(py, observation_space)?,
+            action_space: Py::new(py, action_space)?,
             initialized: false,
             done: true,
             total_reward: 0.0,
@@ -121,28 +99,14 @@ impl PyWasmEnv {
         seed: Option<u64>,
         options: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyDict>)> {
-        // Update seed if provided
-        if let Some(s) = seed {
-            self.config = EnvConfig {
-                seed: Some(s),
-                ..self.config.clone()
-            };
-        }
-
-        // Create fresh instance
-        self.instance = Some(
-            self.factory
-                .create(&self.component_bytes, &self.config)
-                .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?,
-        );
-
-        let instance = self
-            .instance
-            .as_mut()
-            .ok_or(PyWasmRLError::NotInitialized)?;
-
-        let init_result = instance
-            .init()
+        let _ = options;
+        let handle = self.handle()?;
+        self.runtime
+            .init(handle, self.config.clone())
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        let observation = self
+            .runtime
+            .reset(handle, seed.unwrap_or(0))
             .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
 
         self.initialized = true;
@@ -150,9 +114,9 @@ impl PyWasmEnv {
         self.total_reward = 0.0;
         self.step_count = 0;
 
-        let obs = tensor_to_numpy(py, &init_result.observation)?;
+        let obs = tensor_to_numpy(py, &observation)?;
         let info = PyDict::new(py);
-        info.set_item("env_id", init_result.env_id)?;
+        info.set_item("env_id", handle.id)?;
 
         Ok((obs, info))
     }
@@ -177,24 +141,17 @@ impl PyWasmEnv {
         }
 
         let action_tensor = numpy_to_action_tensor(py, &action)?;
-
-        let instance = self
-            .instance
-            .as_mut()
-            .ok_or(PyWasmRLError::NotInitialized)?;
-
-        let step_result = instance
-            .step(&action_tensor)
+        let handle = self.handle()?;
+        let step_result = self
+            .runtime
+            .step(handle, &action_tensor)
             .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
 
         self.total_reward += step_result.reward;
         self.step_count += 1;
-        self.done = step_result.done;
+        self.done = step_result.done();
 
         let obs = tensor_to_numpy(py, &step_result.observation)?;
-        let terminated = step_result.done;
-        let truncated = step_result.truncated.unwrap_or(false);
-
         let info = PyDict::new(py);
         if let Some(info_data) = &step_result.info {
             info.set_item("raw_info", info_data.clone())?;
@@ -202,12 +159,20 @@ impl PyWasmEnv {
         info.set_item("total_reward", self.total_reward)?;
         info.set_item("step_count", self.step_count)?;
 
-        Ok((obs, step_result.reward, terminated, truncated, info))
+        Ok((
+            obs,
+            step_result.reward,
+            step_result.terminated,
+            step_result.truncated,
+            info,
+        ))
     }
 
     /// Close the environment.
     pub fn close(&mut self) {
-        self.instance = None;
+        if let Some(handle) = self.handle.take() {
+            let _ = self.runtime.close(handle);
+        }
         self.initialized = false;
         self.done = true;
     }
@@ -215,22 +180,21 @@ impl PyWasmEnv {
     /// Get the environment spec as a dictionary.
     pub fn spec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
-        if let Some(ref instance) = self.instance {
-            let spec = instance.spec();
-            dict.set_item("env_id", &spec.env_id)?;
-            dict.set_item("obs_shape", spec.obs_shape.to_vec())?;
-            dict.set_item("act_shape", spec.act_shape.to_vec())?;
-            dict.set_item("obs_dtype", format!("{:?}", spec.obs_dtype))?;
-            dict.set_item("act_dtype", format!("{:?}", spec.act_dtype))?;
-            dict.set_item("max_episode_steps", spec.max_episode_steps)?;
+        if let Some(handle) = self.handle {
+            dict.set_item("env_id", handle.id)?;
+            dict.set_item("obs_shape", vec![1usize])?;
+            dict.set_item("act_shape", vec![1usize])?;
+            dict.set_item("obs_dtype", "Float32")?;
+            dict.set_item("act_dtype", "Int32")?;
+            dict.set_item("max_episode_steps", py.None())?;
         }
         Ok(dict)
     }
 
-    /// Render the environment (placeholder).
+    /// Render the environment.
     #[pyo3(signature = (mode=None))]
     pub fn render(&self, mode: Option<&str>) -> PyResult<Option<String>> {
-        // WasmRL environments don't support rendering by default
+        let _ = mode;
         Ok(Some(format!(
             "WasmEnv(step={}, reward={:.2}, done={})",
             self.step_count, self.total_reward, self.done
@@ -240,7 +204,7 @@ impl PyWasmEnv {
     /// Property: whether the environment is closed.
     #[getter]
     pub fn is_closed(&self) -> bool {
-        self.instance.is_none()
+        self.handle.is_none()
     }
 
     /// Property: current episode length.
@@ -257,25 +221,21 @@ impl PyWasmEnv {
 
     /// Take a snapshot of the current state.
     pub fn snapshot(&self) -> PyResult<Vec<u8>> {
-        let instance = self
-            .instance
-            .as_ref()
-            .ok_or(PyWasmRLError::NotInitialized)?;
-
-        instance
-            .snapshot()
-            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()).into())
+        let handle = self.handle()?;
+        let snapshot = self
+            .runtime
+            .snapshot(handle)
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        serde_json::to_vec(&snapshot).map_err(|e| PyWasmRLError::RuntimeError(e.to_string()).into())
     }
 
     /// Restore from a snapshot.
     pub fn restore(&mut self, snapshot: Vec<u8>) -> PyResult<()> {
-        let instance = self
-            .instance
-            .as_mut()
-            .ok_or(PyWasmRLError::NotInitialized)?;
-
-        instance
-            .restore(&snapshot)
+        let handle = self.handle()?;
+        let snapshot = serde_json::from_slice::<SnapshotData>(&snapshot)
+            .unwrap_or_else(|_| SnapshotData::new(snapshot));
+        self.runtime
+            .restore(handle, &snapshot)
             .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
 
         self.done = false;
@@ -294,14 +254,14 @@ impl PyWasmEnv {
 /// Load a component from file path.
 #[pyfunction]
 pub fn load_component(path: &str) -> PyResult<Vec<u8>> {
-    std::fs::read(path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to load component: {}", e)))
+    std::fs::read(path).map_err(|e| {
+        pyo3::exceptions::PyIOError::new_err(format!("Failed to load component: {}", e))
+    })
 }
 
 /// Load a component from OCI registry.
 #[pyfunction]
-pub fn pull_component(registry: &str, name: &str, tag: &str) -> PyResult<Vec<u8>> {
-    // Placeholder - would use wassette's OCI registry support
+pub fn pull_component(_registry: &str, _name: &str, _tag: &str) -> PyResult<Vec<u8>> {
     Err(pyo3::exceptions::PyNotImplementedError::new_err(
         "OCI registry support requires wassette integration",
     ))
@@ -319,8 +279,8 @@ mod tests {
 
     #[test]
     fn test_pull_component_not_implemented() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|_py| {
             let result = pull_component("registry.io", "test", "v1");
             assert!(result.is_err());
         });

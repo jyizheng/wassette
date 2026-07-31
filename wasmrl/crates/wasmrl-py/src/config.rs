@@ -3,13 +3,16 @@
 
 //! Environment configuration for Python.
 
+use std::time::Duration;
+
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use wasmrl_runtime::{PolicyConfig, RuntimeConfig};
+use wasmrl_wit::EnvConfig;
 
 /// Python-exposed environment configuration.
 #[pyclass(name = "EnvConfig")]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PyEnvConfig {
     /// Environment-specific configuration as JSON.
     #[pyo3(get, set)]
@@ -88,13 +91,12 @@ impl PyEnvConfig {
         if let Some(val) = dict.get_item("config")? {
             if let Ok(s) = val.extract::<String>() {
                 config.config_json = s;
-            } else if let Ok(d) = val.downcast::<pyo3::types::PyDict>() {
+            } else if let Ok(d) = val.cast::<pyo3::types::PyDict>() {
                 // Convert dict to JSON
-                let json_str = Python::with_gil(|py| {
-                    let json = py.import("json")?;
-                    let result = json.call_method1("dumps", (d,))?;
-                    result.extract::<String>()
-                })?;
+                let py = dict.py();
+                let json = py.import("json")?;
+                let result = json.call_method1("dumps", (d,))?;
+                let json_str = result.extract::<String>()?;
                 config.config_json = json_str;
             }
         }
@@ -125,7 +127,7 @@ impl PyEnvConfig {
     }
 
     /// Convert to a Python dict.
-    pub fn to_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("config_json", &self.config_json)?;
         dict.set_item("num_envs", self.num_envs)?;
@@ -135,7 +137,7 @@ impl PyEnvConfig {
         dict.set_item("timeout_reset_ms", self.timeout_reset_ms)?;
         dict.set_item("auto_reset", self.auto_reset)?;
         dict.set_item("seed", self.seed)?;
-        Ok(dict.into())
+        Ok(dict.into_any().unbind())
     }
 
     /// String representation.
@@ -144,6 +146,35 @@ impl PyEnvConfig {
             "EnvConfig(num_envs={}, max_memory_mb={}, seed={})",
             self.num_envs, self.max_memory_mb, self.seed
         )
+    }
+}
+
+impl PyEnvConfig {
+    /// Convert to the WIT environment config.
+    pub fn to_env_config(&self) -> EnvConfig {
+        EnvConfig::new(self.config_json.clone())
+    }
+
+    /// Convert to runtime configuration.
+    pub fn to_runtime_config(&self) -> RuntimeConfig {
+        RuntimeConfig::new()
+            .with_max_instances(self.num_envs.max(1))
+            .with_max_memory_mb(self.max_memory_mb as u64)
+            .with_fuel_per_step(self.fuel_per_step)
+            .with_step_timeout(Duration::from_millis(self.timeout_step_ms))
+            .with_reset_timeout(Duration::from_millis(self.timeout_reset_ms))
+    }
+
+    /// Convert to runtime policy configuration.
+    pub fn to_policy_config(&self) -> PolicyConfig {
+        PolicyConfig {
+            max_memory_mb: Some(self.max_memory_mb as u64),
+            fuel_per_step: Some(self.fuel_per_step),
+            timeout_ms_step: Some(self.timeout_step_ms),
+            timeout_ms_reset: Some(self.timeout_reset_ms),
+            network_enabled: false,
+            ..Default::default()
+        }
     }
 }
 
@@ -169,12 +200,11 @@ pub fn dict_to_json(dict: Option<&Bound<'_, pyo3::types::PyAny>>) -> PyResult<St
         Some(val) => {
             if let Ok(s) = val.extract::<String>() {
                 Ok(s)
-            } else if val.downcast::<pyo3::types::PyDict>().is_ok() {
-                Python::with_gil(|py| {
-                    let json = py.import("json")?;
-                    let result = json.call_method1("dumps", (val,))?;
-                    result.extract::<String>()
-                })
+            } else if val.cast::<pyo3::types::PyDict>().is_ok() {
+                let py = val.py();
+                let json = py.import("json")?;
+                let result = json.call_method1("dumps", (val,))?;
+                result.extract::<String>()
             } else {
                 Ok("{}".to_string())
             }

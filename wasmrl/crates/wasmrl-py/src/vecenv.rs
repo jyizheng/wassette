@@ -2,48 +2,33 @@
 // Licensed under the MIT license.
 
 //! Vectorized environment for parallel RL training.
-//! Implements Gymnasium VecEnv interface for compatibility with SB3, RLlib, etc.
+//! Implements a Gymnasium-like VecEnv interface.
+
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use numpy::{PyArray1, PyArray2};
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use wasmrl_runtime::{ComponentRef, EnvRuntime, InstanceHandle, WasmEnvFactory};
+use wasmrl_wit::{EnvConfig, SnapshotData, Tensor};
 
 use crate::config::PyEnvConfig;
 use crate::error::PyWasmRLError;
 use crate::spaces::{make_box_space, make_discrete_space, PySpace};
 use crate::tensor::{numpy_batch_to_action_tensors, stack_observations};
-use numpy::{PyArray1, PyArray2};
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
-use std::sync::Arc;
-use wasmrl_runtime::{EnvConfig, EnvFactory, EnvPool, EnvPoolConfig, WasmEnvInstance};
-use wasmrl_wit::Tensor;
 
 /// Vectorized WasmRL environment for parallel training.
-/// 
-/// This class implements the Gymnasium VecEnv interface, allowing seamless
-/// integration with popular RL libraries like Stable-Baselines3.
-///
-/// Example:
-/// ```python
-/// from wasmrl_py import WasmVecEnv, EnvConfig
-/// 
-/// config = EnvConfig(num_envs=8, max_memory_mb=64)
-/// env = WasmVecEnv("counter.wasm", config)
-/// 
-/// obs, info = env.reset()
-/// for _ in range(1000):
-///     actions = env.action_space.sample()
-///     obs, rewards, dones, truncs, infos = env.step(actions)
-/// ```
 #[pyclass(name = "WasmVecEnv")]
 pub struct PyWasmVecEnv {
-    /// Environment pool for parallel execution.
-    pool: EnvPool,
-    /// Individual environment instances.
-    instances: Vec<Box<dyn WasmEnvInstance>>,
-    /// Factory for creating new instances.
-    factory: Arc<EnvFactory>,
-    /// Component bytes.
-    component_bytes: Vec<u8>,
-    /// Configuration.
+    /// Runtime used for batch execution.
+    runtime: EnvRuntime,
+    /// Active runtime handles.
+    handles: Vec<InstanceHandle>,
+    /// Environment configuration.
     config: EnvConfig,
+    /// Base seed used when no reset seed is provided.
+    seed: u64,
     /// Number of environments.
     #[pyo3(get)]
     num_envs: usize,
@@ -69,13 +54,13 @@ pub struct PyWasmVecEnv {
 #[pymethods]
 impl PyWasmVecEnv {
     /// Create a new vectorized environment.
-    ///
-    /// Args:
-    ///     component_path: Path to the .wasm component file.
-    ///     config: Environment configuration (optional).
     #[new]
     #[pyo3(signature = (component_path, config=None))]
-    pub fn new(py: Python<'_>, component_path: &str, config: Option<&PyEnvConfig>) -> PyResult<Self> {
+    pub fn new(
+        py: Python<'_>,
+        component_path: &str,
+        config: Option<&PyEnvConfig>,
+    ) -> PyResult<Self> {
         let component_bytes = std::fs::read(component_path).map_err(|e| {
             pyo3::exceptions::PyIOError::new_err(format!("Failed to load component: {}", e))
         })?;
@@ -93,77 +78,37 @@ impl PyWasmVecEnv {
     ) -> PyResult<Self> {
         let py_config = config.cloned().unwrap_or_default();
         let env_config = py_config.to_env_config();
-        let num_envs = py_config.num_envs as usize;
+        let num_envs = py_config.num_envs.max(1);
 
-        // Create factory
-        let factory = EnvFactory::new()
-            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        let factory = WasmEnvFactory::with_config(
+            ComponentRef::from_bytes(component_bytes),
+            py_config.to_policy_config(),
+            py_config.to_runtime_config(),
+        )
+        .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
         let factory = Arc::new(factory);
-
-        // Create pool config
-        let pool_config = EnvPoolConfig {
-            num_envs,
-            max_memory_per_env: py_config.max_memory_mb as usize * 1024 * 1024,
-            enable_snapshots: true,
-            auto_reset: py_config.auto_reset,
-        };
-
-        // Create pool
-        let pool = EnvPool::new(pool_config.clone())
+        let handles = factory
+            .spawn(num_envs)
             .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
-
-        // Create individual instances
-        let mut instances = Vec::with_capacity(num_envs);
-        for _ in 0..num_envs {
-            let instance = factory
-                .create(&component_bytes, &env_config)
+        let mut runtime = EnvRuntime::new(factory);
+        for handle in &handles {
+            runtime
+                .init(*handle, env_config.clone())
                 .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
-            instances.push(instance);
         }
 
-        // Get spec from first instance
-        let spec = instances[0].spec();
-
-        // Create observation space
-        let obs_space = if spec.obs_dtype.is_floating_point() {
-            make_box_space(
-                py,
-                -f32::INFINITY,
-                f32::INFINITY,
-                spec.obs_shape.iter().map(|&x| x as usize).collect(),
-            )?
-        } else {
-            let max_val = spec
-                .obs_shape
-                .iter()
-                .map(|&x| x as i64)
-                .product::<i64>()
-                .max(1);
-            make_discrete_space(py, max_val, 0)?
-        };
-
-        // Create action space
-        let act_space = if spec.act_dtype.is_floating_point() {
-            make_box_space(
-                py,
-                -1.0,
-                1.0,
-                spec.act_shape.iter().map(|&x| x as usize).collect(),
-            )?
-        } else {
-            let n = spec.act_shape.first().copied().unwrap_or(1) as i64;
-            make_discrete_space(py, n, 0)?
-        };
+        let (_, observation_space) =
+            make_box_space(vec![1], f32::NEG_INFINITY as f64, f32::INFINITY as f64);
+        let (_, action_space) = make_discrete_space(2);
 
         Ok(Self {
-            pool,
-            instances,
-            factory,
-            component_bytes,
+            runtime,
+            handles,
             config: env_config,
+            seed: py_config.seed,
             num_envs,
-            single_observation_space: obs_space,
-            single_action_space: act_space,
+            single_observation_space: Py::new(py, observation_space)?,
+            single_action_space: Py::new(py, action_space)?,
             auto_reset: py_config.auto_reset,
             initialized: false,
             dones: vec![true; num_envs],
@@ -173,13 +118,6 @@ impl PyWasmVecEnv {
     }
 
     /// Reset all environments.
-    ///
-    /// Args:
-    ///     seed: Random seed for reproducibility (optional).
-    ///     options: Additional options (optional).
-    ///
-    /// Returns:
-    ///     Tuple of (observations, info_dict).
     #[pyo3(signature = (seed=None, options=None))]
     pub fn reset<'py>(
         &mut self,
@@ -187,34 +125,26 @@ impl PyWasmVecEnv {
         seed: Option<u64>,
         options: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyDict>)> {
-        let mut observations = Vec::with_capacity(self.num_envs);
+        let _ = options;
+        let base_seed = seed.unwrap_or(self.seed);
+        let seeds: Vec<u64> = (0..self.num_envs)
+            .map(|i| base_seed.wrapping_add(i as u64))
+            .collect();
 
-        for (i, instance) in self.instances.iter_mut().enumerate() {
-            // Optionally update seed per environment
-            if let Some(base_seed) = seed {
-                let env_seed = base_seed.wrapping_add(i as u64);
-                // Re-create instance with new seed
-                let new_config = EnvConfig {
-                    seed: Some(env_seed),
-                    ..self.config.clone()
-                };
-                *instance = self
-                    .factory
-                    .create(&self.component_bytes, &new_config)
-                    .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
-            }
-
-            let init_result = instance
-                .init()
+        for handle in &self.handles {
+            self.runtime
+                .init(*handle, self.config.clone())
                 .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
-
-            observations.push(init_result.observation);
-            self.dones[i] = false;
-            self.episode_rewards[i] = 0.0;
-            self.episode_lengths[i] = 0;
         }
+        let observations = self
+            .runtime
+            .reset_many(&self.handles, &seeds)
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
 
         self.initialized = true;
+        self.dones.fill(false);
+        self.episode_rewards.fill(0.0);
+        self.episode_lengths.fill(0);
 
         let obs_array = stack_observations(py, &observations)?;
         let info = PyDict::new(py);
@@ -224,12 +154,6 @@ impl PyWasmVecEnv {
     }
 
     /// Step all environments with given actions.
-    ///
-    /// Args:
-    ///     actions: Numpy array of actions, shape (num_envs,) or (num_envs, action_dim).
-    ///
-    /// Returns:
-    ///     Tuple of (observations, rewards, terminateds, truncateds, infos).
     pub fn step<'py>(
         &mut self,
         py: Python<'py>,
@@ -246,74 +170,51 @@ impl PyWasmVecEnv {
         }
 
         let action_tensors = numpy_batch_to_action_tensors(py, &actions, self.num_envs)?;
+        let mut batch = self
+            .runtime
+            .step_many(&self.handles, &action_tensors)
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
 
-        let mut observations = Vec::with_capacity(self.num_envs);
-        let mut rewards = Vec::with_capacity(self.num_envs);
-        let mut terminateds = Vec::with_capacity(self.num_envs);
-        let mut truncateds = Vec::with_capacity(self.num_envs);
         let mut final_observations: Vec<Option<Tensor>> = vec![None; self.num_envs];
         let mut final_infos: Vec<Option<String>> = vec![None; self.num_envs];
 
-        for (i, (instance, action)) in self.instances.iter_mut().zip(action_tensors).enumerate() {
-            let step_result = instance
-                .step(&action)
-                .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
-
-            let terminated = step_result.done;
-            let truncated = step_result.truncated.unwrap_or(false);
-            let done = terminated || truncated;
-
-            // Update episode stats
-            self.episode_rewards[i] += step_result.reward;
+        for i in 0..self.num_envs {
+            let done = batch.terminated[i] || batch.truncated[i];
+            self.episode_rewards[i] += batch.rewards[i];
             self.episode_lengths[i] += 1;
+            self.dones[i] = done;
 
-            // Handle auto-reset
             if done && self.auto_reset {
-                // Store final observation before reset
-                final_observations[i] = Some(step_result.observation.clone());
-                final_infos[i] = step_result.info.clone();
+                final_observations[i] = Some(batch.observations[i].clone());
+                final_infos[i] = batch.infos[i].clone();
 
-                // Reset this environment
-                let init_result = instance
-                    .init()
+                let seed = self.seed.wrapping_add(i as u64);
+                batch.observations[i] = self
+                    .runtime
+                    .reset(self.handles[i], seed)
                     .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
-
-                observations.push(init_result.observation);
-
-                // Reset episode stats
                 self.episode_rewards[i] = 0.0;
                 self.episode_lengths[i] = 0;
-            } else {
-                observations.push(step_result.observation);
+                self.dones[i] = false;
             }
-
-            rewards.push(step_result.reward);
-            terminateds.push(terminated);
-            truncateds.push(truncated);
-            self.dones[i] = done;
         }
 
-        let obs_array = stack_observations(py, &observations)?;
-        let rewards_array = PyArray1::from_vec(py, rewards);
-        let terminateds_array = PyArray1::from_vec(py, terminateds);
-        let truncateds_array = PyArray1::from_vec(py, truncateds);
+        let obs_array = stack_observations(py, &batch.observations)?;
+        let rewards_array = PyArray1::from_vec(py, batch.rewards);
+        let terminateds_array = PyArray1::from_vec(py, batch.terminated);
+        let truncateds_array = PyArray1::from_vec(py, batch.truncated);
 
-        // Build info dict
         let info = PyDict::new(py);
-        
-        // Add final observations for auto-reset (Gymnasium VecEnv API)
         let final_obs_list = PyList::empty(py);
         for obs in &final_observations {
             if let Some(o) = obs {
-                let arr = crate::tensor::tensor_to_numpy(py, o)?;
-                final_obs_list.append(arr)?;
+                final_obs_list.append(crate::tensor::tensor_to_numpy(py, o)?)?;
             } else {
                 final_obs_list.append(py.None())?;
             }
         }
         info.set_item("final_observation", final_obs_list)?;
-        
-        // Add episode rewards and lengths
+        info.set_item("final_info", final_infos)?;
         info.set_item("episode_rewards", self.episode_rewards.clone())?;
         info.set_item("episode_lengths", self.episode_lengths.clone())?;
 
@@ -335,6 +236,7 @@ impl PyWasmVecEnv {
         seed: Option<u64>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let mut observations = Vec::with_capacity(indices.len());
+        let base_seed = seed.unwrap_or(self.seed);
 
         for (offset, &i) in indices.iter().enumerate() {
             if i >= self.num_envs {
@@ -344,24 +246,15 @@ impl PyWasmVecEnv {
                 )));
             }
 
-            // Optionally update seed
-            if let Some(base_seed) = seed {
-                let env_seed = base_seed.wrapping_add(offset as u64);
-                let new_config = EnvConfig {
-                    seed: Some(env_seed),
-                    ..self.config.clone()
-                };
-                self.instances[i] = self
-                    .factory
-                    .create(&self.component_bytes, &new_config)
-                    .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
-            }
-
-            let init_result = self.instances[i]
-                .init()
+            self.runtime
+                .init(self.handles[i], self.config.clone())
+                .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+            let obs = self
+                .runtime
+                .reset(self.handles[i], base_seed.wrapping_add(offset as u64))
                 .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
 
-            observations.push(init_result.observation);
+            observations.push(obs);
             self.dones[i] = false;
             self.episode_rewards[i] = 0.0;
             self.episode_lengths[i] = 0;
@@ -372,8 +265,11 @@ impl PyWasmVecEnv {
 
     /// Close all environments.
     pub fn close(&mut self) {
-        self.instances.clear();
+        for handle in self.handles.drain(..) {
+            let _ = self.runtime.close(handle);
+        }
         self.initialized = false;
+        self.dones.fill(true);
     }
 
     /// Get environment at specific index.
@@ -387,29 +283,32 @@ impl PyWasmVecEnv {
         Ok(format!("WasmEnv[{}]", index))
     }
 
-    /// Sample random actions for all environments.
+    /// Sample random discrete actions for all environments.
     pub fn sample_actions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i32>>> {
-        // For now, sample discrete actions
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        
-        // Get action space size from first instance
-        let spec = self.instances[0].spec();
-        let n_actions = spec.act_shape.first().copied().unwrap_or(1) as i32;
-        
+        let mut rng_state = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
         let actions: Vec<i32> = (0..self.num_envs)
-            .map(|_| rng.gen_range(0..n_actions))
+            .map(|_| {
+                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (rng_state % 2) as i32
+            })
             .collect();
-        
+
         Ok(PyArray1::from_vec(py, actions))
     }
 
     /// Take snapshots of all environments.
     pub fn snapshot_all(&self) -> PyResult<Vec<Vec<u8>>> {
-        self.instances
+        self.handles
             .iter()
-            .map(|inst| {
-                inst.snapshot()
+            .map(|handle| {
+                let snapshot = self
+                    .runtime
+                    .snapshot(*handle)
+                    .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+                serde_json::to_vec(&snapshot)
                     .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()).into())
             })
             .collect()
@@ -425,9 +324,11 @@ impl PyWasmVecEnv {
             )));
         }
 
-        for (instance, snapshot) in self.instances.iter_mut().zip(snapshots) {
-            instance
-                .restore(&snapshot)
+        for (handle, snapshot) in self.handles.iter().zip(snapshots) {
+            let snapshot = serde_json::from_slice::<SnapshotData>(&snapshot)
+                .unwrap_or_else(|_| SnapshotData::new(snapshot));
+            self.runtime
+                .restore(*handle, &snapshot)
                 .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
         }
 
@@ -468,16 +369,6 @@ impl PyWasmVecEnv {
 }
 
 /// Create a vectorized environment from component path.
-///
-/// This is the main entry point for creating WasmRL vectorized environments.
-///
-/// Args:
-///     component_path: Path to the .wasm component file.
-///     num_envs: Number of parallel environments.
-///     config: Additional configuration (optional).
-///
-/// Returns:
-///     A WasmVecEnv instance.
 #[pyfunction]
 #[pyo3(signature = (component_path, num_envs=8, config=None))]
 pub fn make_vec_env(
@@ -487,8 +378,8 @@ pub fn make_vec_env(
     config: Option<&PyEnvConfig>,
 ) -> PyResult<PyWasmVecEnv> {
     let mut py_config = config.cloned().unwrap_or_default();
-    py_config.num_envs = num_envs;
-    
+    py_config.num_envs = num_envs as usize;
+
     PyWasmVecEnv::new(py, component_path, Some(&py_config))
 }
 
@@ -497,7 +388,7 @@ pub fn make_vec_env(
 #[pyo3(signature = (directory="."))]
 pub fn list_available_envs(directory: &str) -> PyResult<Vec<String>> {
     let mut envs = Vec::new();
-    
+
     if let Ok(entries) = std::fs::read_dir(directory) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -508,7 +399,7 @@ pub fn list_available_envs(directory: &str) -> PyResult<Vec<String>> {
             }
         }
     }
-    
+
     envs.sort();
     Ok(envs)
 }
@@ -525,8 +416,8 @@ mod tests {
 
     #[test]
     fn test_make_vec_env_missing_file() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             let result = make_vec_env(py, "/nonexistent.wasm", 4, None);
             assert!(result.is_err());
         });

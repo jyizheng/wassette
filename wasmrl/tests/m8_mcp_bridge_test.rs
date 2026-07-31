@@ -12,9 +12,8 @@
 use std::time::Duration;
 
 use wasmrl_mcp_bridge::{
-    BridgeError, EnvMcpBridge, McpBridgeConfig, McpTool, OverheadMetrics,
-    SessionConfig, SessionId, SessionManager, SessionState, TimingBreakdown,
-    ToolResult,
+    BridgeError, EnvMcpBridge, McpBridgeConfig, McpTool, OverheadMetrics, SessionConfig, SessionId,
+    SessionManager, SessionState, TimingBreakdown, ToolResult,
 };
 
 // =============================================================================
@@ -68,7 +67,7 @@ fn test_session_config_builder() {
 #[test]
 fn test_session_id_uniqueness() {
     let ids: Vec<SessionId> = (0..100).map(|_| SessionId::new()).collect();
-    
+
     for i in 0..ids.len() {
         for j in (i + 1)..ids.len() {
             assert_ne!(ids[i], ids[j], "Session IDs should be unique");
@@ -79,22 +78,22 @@ fn test_session_id_uniqueness() {
 #[test]
 fn test_session_manager_lifecycle() {
     let mut manager = SessionManager::new(10);
-    
+
     // Create sessions
     let id1 = manager.create_session(SessionConfig::new()).unwrap();
     let id2 = manager.create_session(SessionConfig::new()).unwrap();
-    
+
     assert_eq!(manager.active_count(), 2);
-    
+
     // Access session
     let session = manager.get(&id1).unwrap();
     assert_eq!(session.state, SessionState::Created);
-    
+
     // Close session
     manager.close_session(&id1).unwrap();
     let session = manager.get(&id1).unwrap();
     assert_eq!(session.state, SessionState::Closed);
-    
+
     // Still have id2 active
     assert!(manager.get(&id2).is_ok());
 }
@@ -102,27 +101,30 @@ fn test_session_manager_lifecycle() {
 #[test]
 fn test_session_manager_max_sessions() {
     let mut manager = SessionManager::new(3);
-    
+
     manager.create_session(SessionConfig::new()).unwrap();
     manager.create_session(SessionConfig::new()).unwrap();
     manager.create_session(SessionConfig::new()).unwrap();
-    
+
     // Fourth should fail
     let result = manager.create_session(SessionConfig::new());
-    assert!(matches!(result, Err(BridgeError::MaxSessionsExceeded { .. })));
+    assert!(matches!(
+        result,
+        Err(BridgeError::MaxSessionsExceeded { .. })
+    ));
 }
 
 #[test]
 fn test_session_state_transitions() {
     assert!(SessionState::Created.can_reset());
     assert!(!SessionState::Created.can_step());
-    
+
     assert!(SessionState::Ready.can_reset());
     assert!(SessionState::Ready.can_step());
-    
+
     assert!(SessionState::Terminated.can_reset());
     assert!(!SessionState::Terminated.can_step());
-    
+
     assert!(SessionState::Closed.is_active() == false);
 }
 
@@ -134,10 +136,10 @@ fn test_session_state_transitions() {
 fn test_bridge_tool_definitions() {
     let config = McpBridgeConfig::new("counter.wasm");
     let bridge = EnvMcpBridge::new(config).unwrap();
-    
+
     let tools = bridge.get_tools();
     assert!(!tools.is_empty());
-    
+
     // Check expected tools exist
     let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert!(tool_names.contains(&"counter_create"));
@@ -153,20 +155,23 @@ fn test_bridge_tool_definitions() {
 fn test_bridge_create_and_reset() {
     let config = McpBridgeConfig::new("env.wasm");
     let mut bridge = EnvMcpBridge::new(config).unwrap();
-    
+
     // Create session
     let result = bridge.call_tool("env_create", serde_json::json!({"seed": 123}));
     assert!(result.is_ok);
-    
-    let session_id = result.data.unwrap()["session_id"].as_str().unwrap().to_string();
-    
+
+    let session_id = result.data.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
     // Reset session
     let result = bridge.call_tool(
         "env_reset",
         serde_json::json!({"session_id": session_id, "seed": 456}),
     );
     assert!(result.is_ok);
-    
+
     let data = result.data.unwrap();
     assert!(data.get("observation").is_some());
 }
@@ -175,13 +180,16 @@ fn test_bridge_create_and_reset() {
 fn test_bridge_step_workflow() {
     let config = McpBridgeConfig::new("env.wasm");
     let mut bridge = EnvMcpBridge::new(config).unwrap();
-    
+
     // Create and reset
     let create = bridge.call_tool("env_create", serde_json::json!({}));
-    let session_id = create.data.unwrap()["session_id"].as_str().unwrap().to_string();
-    
+    let session_id = create.data.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
     bridge.call_tool("env_reset", serde_json::json!({"session_id": &session_id}));
-    
+
     // Step multiple times
     for _ in 0..10 {
         let result = bridge.call_tool(
@@ -189,7 +197,7 @@ fn test_bridge_step_workflow() {
             serde_json::json!({"session_id": &session_id, "action": 0}),
         );
         assert!(result.is_ok);
-        
+
         let data = result.data.unwrap();
         assert!(data.get("observation").is_some());
         assert!(data.get("reward").is_some());
@@ -201,12 +209,12 @@ fn test_bridge_step_workflow() {
 fn test_bridge_session_not_found() {
     let config = McpBridgeConfig::new("env.wasm");
     let mut bridge = EnvMcpBridge::new(config).unwrap();
-    
+
     let result = bridge.call_tool(
         "env_reset",
         serde_json::json!({"session_id": "nonexistent-session"}),
     );
-    
+
     assert!(!result.is_ok);
     assert!(result.error.unwrap().contains("not found"));
 }
@@ -215,9 +223,9 @@ fn test_bridge_session_not_found() {
 fn test_bridge_unknown_tool() {
     let config = McpBridgeConfig::new("env.wasm");
     let mut bridge = EnvMcpBridge::new(config).unwrap();
-    
+
     let result = bridge.call_tool("unknown_tool", serde_json::json!({}));
-    
+
     assert!(!result.is_ok);
     assert!(result.error.unwrap().contains("Unknown tool"));
 }
@@ -226,15 +234,15 @@ fn test_bridge_unknown_tool() {
 fn test_bridge_list_sessions() {
     let config = McpBridgeConfig::new("env.wasm");
     let mut bridge = EnvMcpBridge::new(config).unwrap();
-    
+
     // Create several sessions
     for _ in 0..5 {
         bridge.call_tool("env_create", serde_json::json!({}));
     }
-    
+
     let result = bridge.call_tool("env_list", serde_json::json!({}));
     assert!(result.is_ok);
-    
+
     let data = result.data.unwrap();
     assert_eq!(data["count"], 5);
 }
@@ -246,12 +254,12 @@ fn test_bridge_list_sessions() {
 #[test]
 fn test_timing_breakdown() {
     let breakdown = TimingBreakdown::new(100, 50, 850);
-    
+
     assert_eq!(breakdown.rpc_serialization_us, 100);
     assert_eq!(breakdown.runtime_overhead_us, 50);
     assert_eq!(breakdown.env_compute_us, 850);
     assert_eq!(breakdown.total_us, 1000);
-    
+
     // Overhead is (100 + 50) / 1000 = 15%
     assert!((breakdown.overhead_ratio() - 0.15).abs() < 0.001);
     assert!((breakdown.efficiency() - 0.85).abs() < 0.001);
@@ -260,7 +268,7 @@ fn test_timing_breakdown() {
 #[test]
 fn test_overhead_metrics_recording() {
     let mut metrics = OverheadMetrics::new();
-    
+
     // Record several calls
     for _ in 0..10 {
         metrics.record_call(
@@ -269,10 +277,10 @@ fn test_overhead_metrics_recording() {
             Duration::from_micros(850),
         );
     }
-    
+
     assert_eq!(metrics.total_calls, 10);
     assert_eq!(metrics.total_env_time().as_micros(), 8500);
-    
+
     // Average overhead should be 15%
     assert!((metrics.avg_overhead_ratio() - 0.15).abs() < 0.01);
 }
@@ -285,10 +293,10 @@ fn test_overhead_summary_report() {
         Duration::from_micros(50),
         Duration::from_micros(850),
     );
-    
+
     let summary = metrics.summary();
     let report = summary.report();
-    
+
     assert!(report.contains("Overhead Report"));
     assert!(report.contains("Total Calls: 1"));
     assert!(report.contains("RPC/Serialization"));
@@ -298,18 +306,24 @@ fn test_overhead_summary_report() {
 fn test_bridge_metrics_collection() {
     let config = McpBridgeConfig::new("env.wasm").with_metrics(true);
     let mut bridge = EnvMcpBridge::new(config).unwrap();
-    
+
     // Perform operations
     let create = bridge.call_tool("env_create", serde_json::json!({}));
-    let session_id = create.data.unwrap()["session_id"].as_str().unwrap().to_string();
-    
+    let session_id = create.data.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
     bridge.call_tool("env_reset", serde_json::json!({"session_id": &session_id}));
-    bridge.call_tool("env_step", serde_json::json!({"session_id": &session_id, "action": 0}));
-    
+    bridge.call_tool(
+        "env_step",
+        serde_json::json!({"session_id": &session_id, "action": 0}),
+    );
+
     // Get metrics
     let result = bridge.call_tool("env_metrics", serde_json::json!({}));
     assert!(result.is_ok);
-    
+
     let metrics = result.data.unwrap();
     assert!(metrics["total_calls"].as_u64().unwrap() >= 3);
 }
@@ -318,10 +332,10 @@ fn test_bridge_metrics_collection() {
 fn test_bridge_timing_in_results() {
     let config = McpBridgeConfig::new("env.wasm").with_metrics(true);
     let mut bridge = EnvMcpBridge::new(config).unwrap();
-    
+
     let result = bridge.call_tool("env_list", serde_json::json!({}));
     assert!(result.is_ok);
-    
+
     // With metrics enabled, timing should be included
     assert!(result.timing.is_some());
     let timing = result.timing.unwrap();
@@ -334,17 +348,23 @@ fn test_bridge_timing_in_results() {
 
 #[test]
 fn test_bridge_error_types() {
-    assert!(BridgeError::session_not_found("x").to_string().contains("not found"));
-    assert!(BridgeError::max_sessions_exceeded(10).to_string().contains("10"));
+    assert!(BridgeError::session_not_found("x")
+        .to_string()
+        .contains("not found"));
+    assert!(BridgeError::max_sessions_exceeded(10)
+        .to_string()
+        .contains("10"));
     assert!(BridgeError::timeout(1000).to_string().contains("1000"));
-    assert!(BridgeError::unknown_tool("x").to_string().contains("Unknown"));
+    assert!(BridgeError::unknown_tool("x")
+        .to_string()
+        .contains("Unknown"));
 }
 
 #[test]
 fn test_bridge_error_recoverability() {
     assert!(BridgeError::invalid_action("bad").is_recoverable());
     assert!(BridgeError::timeout(100).is_recoverable());
-    
+
     assert!(BridgeError::component_load("fail").is_fatal());
     assert!(BridgeError::policy_violation("denied").is_fatal());
 }
@@ -380,39 +400,40 @@ fn test_tool_result_error() {
 fn test_tool_result_with_timing() {
     let timing = TimingBreakdown::new(10, 5, 85);
     let result = ToolResult::success_with_timing(serde_json::json!({}), timing);
-    
+
     assert!(result.is_ok);
     assert!(result.timing.is_some());
 }
 
 // =============================================================================
-// Benchmark Mode Tests  
+// Benchmark Mode Tests
 // =============================================================================
 
 #[test]
 fn test_bench_mode_switch() {
     use wasmrl_bench::{BenchConfig, BenchMode};
-    
+
     let inproc_config = BenchConfig::new()
         .with_mode(BenchMode::WasmInproc)
         .with_num_envs(256);
-    
+
     let mcp_config = BenchConfig::new()
         .with_mode(BenchMode::McpTool)
-        .with_num_envs(16);  // Fewer envs for MCP due to overhead
-    
+        .with_num_envs(16); // Fewer envs for MCP due to overhead
+
     assert_eq!(inproc_config.mode, BenchMode::WasmInproc);
     assert_eq!(mcp_config.mode, BenchMode::McpTool);
-    
+
     assert!(inproc_config.mode.is_inproc());
     assert!(mcp_config.mode.has_rpc_overhead());
 }
 
 #[test]
 fn test_bench_mode_comparison() {
-    use wasmrl_bench::{BenchMode, ModeComparison, TimingResult};
     use std::time::Duration;
-    
+
+    use wasmrl_bench::{BenchMode, ModeComparison, TimingResult};
+
     let inproc_result = TimingResult {
         mean: Duration::from_micros(100),
         std_dev: Duration::from_micros(10),
@@ -422,9 +443,9 @@ fn test_bench_mode_comparison() {
         p99: Duration::from_micros(115),
         samples: 1000,
     };
-    
+
     let mcp_result = TimingResult {
-        mean: Duration::from_micros(1000),  // 10x slower
+        mean: Duration::from_micros(1000), // 10x slower
         std_dev: Duration::from_micros(100),
         min: Duration::from_micros(800),
         max: Duration::from_micros(1200),
@@ -432,20 +453,20 @@ fn test_bench_mode_comparison() {
         p99: Duration::from_micros(1150),
         samples: 1000,
     };
-    
+
     let comparison = ModeComparison::new(
         BenchMode::WasmInproc,
         BenchMode::McpTool,
         &inproc_result,
         &mcp_result,
     );
-    
+
     // MCP is 10x slower, so speedup = 0.1
     assert!((comparison.speedup - 0.1).abs() < 0.01);
-    
+
     // Overhead is 900%
     assert!((comparison.overhead_percent - 900.0).abs() < 1.0);
-    
+
     let report = comparison.report();
     assert!(report.contains("wasm_inproc"));
     assert!(report.contains("mcp_tool"));

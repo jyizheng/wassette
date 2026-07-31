@@ -30,8 +30,6 @@
 
 #![warn(missing_docs)]
 
-use std::mem;
-
 /// A deterministic pseudo-random number generator for environment use.
 ///
 /// Uses the PCG (Permuted Congruential Generator) algorithm which provides:
@@ -84,6 +82,19 @@ impl DeterministicRng {
         let xorshifted = (((old_state >> 18) ^ old_state) >> 27) as u32;
         let rot = (old_state >> 59) as u32;
         ((xorshifted >> rot) | (xorshifted << ((!rot).wrapping_add(1) & 31))) as u64
+    }
+
+    /// Generate the next random u64.
+    ///
+    /// This is an explicit alias for [`Self::next`] so environment code can use
+    /// integer-specific naming without depending on implementation details.
+    pub fn next_u64(&mut self) -> u64 {
+        self.next()
+    }
+
+    /// Return the internal RNG state for deterministic snapshots.
+    pub fn state(&self) -> u64 {
+        self.state
     }
 
     /// Generate a random u64 in range [0, max).
@@ -398,6 +409,16 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_rng_explicit_u64_and_state() {
+        let mut rng = DeterministicRng::new(42);
+        let initial_state = rng.state();
+        let mut same_rng = rng.clone();
+
+        assert_eq!(rng.next_u64(), same_rng.next());
+        assert_ne!(rng.state(), initial_state);
+    }
+
+    #[test]
     fn test_deterministic_rng_range() {
         let mut rng = DeterministicRng::new(42);
         for _ in 0..100 {
@@ -428,13 +449,13 @@ mod tests {
     fn test_deterministic_rng_shuffle() {
         let mut rng1 = DeterministicRng::new(42);
         let mut rng2 = DeterministicRng::new(42);
-        
+
         let mut arr1 = vec![1, 2, 3, 4, 5];
         let mut arr2 = vec![1, 2, 3, 4, 5];
-        
+
         rng1.shuffle(&mut arr1);
         rng2.shuffle(&mut arr2);
-        
+
         assert_eq!(arr1, arr2);
     }
 
@@ -443,7 +464,7 @@ mod tests {
         let data = vec![1.0f32, 2.0, 3.0];
         let bytes = TensorEncoder::encode_f32(&data);
         assert_eq!(bytes.len(), 12);
-        
+
         let decoded = TensorDecoder::decode_f32(&bytes).unwrap();
         assert_eq!(decoded, data);
     }
@@ -453,7 +474,7 @@ mod tests {
         let data = vec![1.0f64, 2.0, 3.0];
         let bytes = TensorEncoder::encode_f64(&data);
         assert_eq!(bytes.len(), 24);
-        
+
         let decoded = TensorDecoder::decode_f64(&bytes).unwrap();
         assert_eq!(decoded, data);
     }
@@ -463,7 +484,7 @@ mod tests {
         let data = vec![1i32, -2, 3];
         let bytes = TensorEncoder::encode_i32(&data);
         assert_eq!(bytes.len(), 12);
-        
+
         let decoded = TensorDecoder::decode_i32(&bytes).unwrap();
         assert_eq!(decoded, data);
     }
@@ -473,7 +494,7 @@ mod tests {
         let data = vec![true, false, true, true];
         let bytes = TensorEncoder::encode_bool(&data);
         assert_eq!(bytes, vec![1, 0, 1, 1]);
-        
+
         let decoded = TensorDecoder::decode_bool(&bytes);
         assert_eq!(decoded, data);
     }
@@ -505,15 +526,15 @@ mod tests {
             value: i32,
             data: Vec<f32>,
         }
-        
+
         let state = TestState {
             value: 42,
             data: vec![1.0, 2.0, 3.0],
         };
-        
+
         let serialized = SnapshotHelper::serialize(&state).unwrap();
         let deserialized: TestState = SnapshotHelper::deserialize(&serialized).unwrap();
-        
+
         assert_eq!(state, deserialized);
     }
 

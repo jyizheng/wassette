@@ -31,6 +31,18 @@ impl Default for ReportFormat {
     }
 }
 
+impl ReportFormat {
+    /// File extension for this report format.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Markdown => "md",
+            Self::Json => "json",
+            Self::Csv => "csv",
+            Self::Latex => "tex",
+        }
+    }
+}
+
 /// Report generator for comparison results.
 pub struct ReportGenerator {
     /// Configuration used.
@@ -80,24 +92,29 @@ impl ReportGenerator {
         // Configuration summary
         writeln!(output, "## Configuration")?;
         writeln!(output)?;
-        writeln!(output, "- **Benchmark iterations**: {}", self.config.benchmark_iterations)?;
-        writeln!(output, "- **Warmup iterations**: {}", self.config.warmup_iterations)?;
-        writeln!(output, "- **Backends tested**: {}", self.config.backends.len())?;
+        writeln!(
+            output,
+            "- **Benchmark iterations**: {}",
+            self.config.iterations
+        )?;
+        writeln!(output, "- **Warmup iterations**: {}", self.config.warmup)?;
+        writeln!(
+            output,
+            "- **Backends tested**: {}",
+            self.config.backends.len()
+        )?;
         writeln!(output)?;
 
         // Hardware info
-        if let Some(hw) = &self.config.hardware {
-            writeln!(output, "## Hardware")?;
-            writeln!(output)?;
-            writeln!(output, "- **CPU**: {} cores", hw.cpu_cores)?;
-            if let Some(mem) = hw.memory_gb {
-                writeln!(output, "- **Memory**: {} GB", mem)?;
-            }
-            if let Some(os) = &hw.os_info {
-                writeln!(output, "- **OS**: {}", os)?;
-            }
-            writeln!(output)?;
+        let hw = &self.config.hardware;
+        writeln!(output, "## Hardware")?;
+        writeln!(output)?;
+        writeln!(output, "- **CPU**: {} cores", hw.cpu_cores)?;
+        writeln!(output, "- **Memory**: {} GB", hw.memory_gb)?;
+        if let Some(os) = &hw.os_info {
+            writeln!(output, "- **OS**: {}", os)?;
         }
+        writeln!(output)?;
 
         // Main comparison table
         writeln!(output, "## Performance Comparison")?;
@@ -111,7 +128,10 @@ impl ReportGenerator {
             writeln!(output)?;
             writeln!(output, "Backend: **{}**", scaling.backend)?;
             writeln!(output)?;
-            writeln!(output, "| Env Count | Throughput (sps) | P99 Latency (µs) |")?;
+            writeln!(
+                output,
+                "| Env Count | Throughput (sps) | P99 Latency (µs) |"
+            )?;
             writeln!(output, "|-----------|-----------------|------------------|")?;
             for point in &scaling.results {
                 writeln!(
@@ -136,7 +156,11 @@ impl ReportGenerator {
             writeln!(output, "|--------|-----------|")?;
             writeln!(output, "| First step (cold) | {} |", cold.first_step_us)?;
             writeln!(output, "| Warm step | {} |", cold.warm_step_us)?;
-            writeln!(output, "| Instance creation | {} |", cold.instance_create_us)?;
+            writeln!(
+                output,
+                "| Instance creation | {} |",
+                cold.instance_create_us
+            )?;
             writeln!(output, "| Overhead ratio | {:.1}x |", cold.overhead_ratio())?;
             writeln!(output)?;
         }
@@ -144,7 +168,10 @@ impl ReportGenerator {
         // Methodology
         writeln!(output, "## Methodology")?;
         writeln!(output)?;
-        writeln!(output, "All measurements follow the fairness protocol defined in CAMEL_COMPARISON.md:")?;
+        writeln!(
+            output,
+            "All measurements follow the fairness protocol defined in CAMEL_COMPARISON.md:"
+        )?;
         writeln!(output)?;
         writeln!(output, "1. Same tasks executed across all backends")?;
         writeln!(output, "2. Warmup phase before measurement")?;
@@ -182,8 +209,8 @@ impl ReportGenerator {
     fn generate_json(&self) -> Result<String> {
         let report = JsonReport {
             config_summary: ConfigSummary {
-                benchmark_iterations: self.config.benchmark_iterations,
-                warmup_iterations: self.config.warmup_iterations,
+                benchmark_iterations: self.config.iterations,
+                warmup_iterations: self.config.warmup,
                 backends: self.config.backends.iter().map(|b| b.to_string()).collect(),
             },
             comparison_table: self.metrics.comparison_table(),
@@ -203,7 +230,10 @@ impl ReportGenerator {
     fn generate_csv(&self) -> Result<String> {
         let mut output = String::new();
 
-        writeln!(output, "backend,step_mean_us,step_p99_us,reset_mean_us,throughput_sps,speedup")?;
+        writeln!(
+            output,
+            "backend,step_mean_us,step_p99_us,reset_mean_us,throughput_sps,speedup"
+        )?;
 
         for row in self.metrics.comparison_table() {
             writeln!(
@@ -227,7 +257,10 @@ impl ReportGenerator {
 
         writeln!(output, "\\begin{{table}}[htbp]")?;
         writeln!(output, "\\centering")?;
-        writeln!(output, "\\caption{{WasmRL vs CAMEL-AI Performance Comparison}}")?;
+        writeln!(
+            output,
+            "\\caption{{WasmRL vs CAMEL-AI Performance Comparison}}"
+        )?;
         writeln!(output, "\\label{{tab:comparison}}")?;
         writeln!(output, "\\begin{{tabular}}{{lrrrrr}}")?;
         writeln!(output, "\\toprule")?;
@@ -370,8 +403,7 @@ mod tests {
     fn test_with_format() {
         let config = ComparisonConfig::minimal();
         let metrics = sample_metrics();
-        let generator = ReportGenerator::new(config, metrics)
-            .with_format(ReportFormat::Csv);
+        let generator = ReportGenerator::new(config, metrics).with_format(ReportFormat::Csv);
 
         assert_eq!(generator.format, ReportFormat::Csv);
     }

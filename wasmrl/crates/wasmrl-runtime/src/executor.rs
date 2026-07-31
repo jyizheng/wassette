@@ -36,7 +36,7 @@ pub struct EnvRuntime {
 
 /// State for a single environment instance.
 #[derive(Debug)]
-struct EnvInstanceState {
+pub struct EnvInstanceState {
     /// Environment configuration.
     config: EnvConfig,
     /// Current seed.
@@ -227,7 +227,11 @@ impl EnvRuntime {
     }
 
     /// Restore an environment instance from a snapshot.
-    pub fn restore(&mut self, handle: InstanceHandle, snapshot: &SnapshotData) -> RuntimeResult<()> {
+    pub fn restore(
+        &mut self,
+        handle: InstanceHandle,
+        snapshot: &SnapshotData,
+    ) -> RuntimeResult<()> {
         if !snapshot.is_compatible() {
             return Err(RuntimeError::execution(format!(
                 "Incompatible snapshot version: {}",

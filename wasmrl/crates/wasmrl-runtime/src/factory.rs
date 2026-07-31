@@ -48,7 +48,6 @@ impl ComponentRef {
 }
 
 /// Factory for creating environment instances.
-#[derive(Debug)]
 pub struct WasmEnvFactory {
     /// Engine context for Wasmtime operations.
     engine: EngineContext,
@@ -62,6 +61,19 @@ pub struct WasmEnvFactory {
     pool: SharedPool,
     /// Component reference for identification.
     component_ref: ComponentRef,
+}
+
+impl std::fmt::Debug for WasmEnvFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmEnvFactory")
+            .field("engine", &self.engine)
+            .field("component", &"<wasmtime::component::Component>")
+            .field("config", &self.config)
+            .field("policy", &self.policy)
+            .field("pool", &self.pool)
+            .field("component_ref", &self.component_ref)
+            .finish()
+    }
 }
 
 impl WasmEnvFactory {
@@ -229,6 +241,16 @@ impl FactoryBuilder {
         self
     }
 
+    /// Get the current runtime configuration.
+    pub fn config(&self) -> &RuntimeConfig {
+        &self.config
+    }
+
+    /// Get the current policy configuration.
+    pub fn policy_config(&self) -> &PolicyConfig {
+        &self.policy
+    }
+
     /// Build the factory from a component file.
     pub fn build_from_file(self, path: &str) -> Result<WasmEnvFactory> {
         WasmEnvFactory::with_config(ComponentRef::from_file(path), self.policy, self.config)
@@ -278,7 +300,7 @@ mod tests {
     #[test]
     fn test_factory_builder_defaults() {
         let builder = FactoryBuilder::new();
-        assert_eq!(builder.config.max_instances, 256);
+        assert_eq!(builder.config().max_instances, 256);
     }
 
     #[test]
@@ -289,11 +311,11 @@ mod tests {
             .fuel_per_step(1_000_000)
             .prewarm(16);
 
-        assert_eq!(builder.config.max_instances, 128);
-        assert_eq!(builder.config.max_memory_bytes, 256 * 1024 * 1024);
-        assert_eq!(builder.config.fuel_per_step, 1_000_000);
-        assert!(builder.config.prewarm_instances);
-        assert_eq!(builder.config.prewarm_count, 16);
+        assert_eq!(builder.config().max_instances, 128);
+        assert_eq!(builder.config().max_memory_bytes, 256 * 1024 * 1024);
+        assert_eq!(builder.config().fuel_per_step, 1_000_000);
+        assert!(builder.config().prewarm_instances);
+        assert_eq!(builder.config().prewarm_count, 16);
     }
 
     // Note: Full factory tests require actual Wasm components

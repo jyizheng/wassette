@@ -5,11 +5,13 @@
 //!
 //! This test suite validates the snapshot/restore and fast reset functionality.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
 use wasmrl_runtime::{
-    FastResetConfig, FastResetManager, FastResetMetrics, ReplayConfig, ReplayManager,
+    FastResetConfig, FastResetManager, InstanceHandle, ReplayConfig, ReplayManager,
     SharedSnapshotCache, SnapshotCache, SnapshotKey,
 };
+use wasmrl_wit::SnapshotData;
 
 // ============================================================================
 // Snapshot Cache Integration Tests
@@ -17,16 +19,12 @@ use wasmrl_runtime::{
 
 #[test]
 fn test_snapshot_cache_basic_operations() {
-    let mut cache = SnapshotCache::new(10, 1024 * 1024);
-
-    let key = SnapshotKey {
-        component_hash: "test-component".to_string(),
-        seed: 42,
-    };
+    let mut cache = SnapshotCache::with_byte_limit(10, 1024 * 1024);
+    let key = SnapshotKey::from_id_seed("test-component", 42);
 
     // Insert snapshot
     let data = vec![1, 2, 3, 4, 5];
-    cache.put(&key, data.clone());
+    cache.put(key.clone(), SnapshotData::new(data.clone()));
 
     // Retrieve snapshot
     let cached = cache.get(&key).unwrap();
@@ -36,30 +34,21 @@ fn test_snapshot_cache_basic_operations() {
 #[test]
 fn test_snapshot_cache_lru_eviction() {
     // Small cache with 3 entries max
-    let mut cache = SnapshotCache::new(3, 1024 * 1024);
+    let mut cache = SnapshotCache::with_byte_limit(3, 1024 * 1024);
 
     // Insert 4 entries
     for i in 0..4u64 {
-        let key = SnapshotKey {
-            component_hash: "comp".to_string(),
-            seed: i,
-        };
-        cache.put(&key, vec![i as u8; 10]);
+        let key = SnapshotKey::from_id_seed("comp", i);
+        cache.put(key, SnapshotData::new(vec![i as u8; 10]));
     }
 
     // First entry should be evicted
-    let first_key = SnapshotKey {
-        component_hash: "comp".to_string(),
-        seed: 0,
-    };
+    let first_key = SnapshotKey::from_id_seed("comp", 0);
     assert!(cache.get(&first_key).is_none());
 
     // Last three should still exist
     for i in 1..4u64 {
-        let key = SnapshotKey {
-            component_hash: "comp".to_string(),
-            seed: i,
-        };
+        let key = SnapshotKey::from_id_seed("comp", i);
         assert!(cache.get(&key).is_some());
     }
 }
@@ -67,15 +56,12 @@ fn test_snapshot_cache_lru_eviction() {
 #[test]
 fn test_snapshot_cache_byte_limit() {
     // Small byte limit (50 bytes)
-    let mut cache = SnapshotCache::new(100, 50);
+    let mut cache = SnapshotCache::with_byte_limit(100, 50);
 
     // Insert entries until byte limit forces eviction
     for i in 0..10u64 {
-        let key = SnapshotKey {
-            component_hash: "comp".to_string(),
-            seed: i,
-        };
-        cache.put(&key, vec![i as u8; 20]); // Each entry ~20 bytes
+        let key = SnapshotKey::from_id_seed("comp", i);
+        cache.put(key, SnapshotData::new(vec![i as u8; 20])); // Each entry ~20 bytes
     }
 
     // Should have at most ~2-3 entries due to byte limit
@@ -84,20 +70,16 @@ fn test_snapshot_cache_byte_limit() {
 
 #[test]
 fn test_shared_snapshot_cache_thread_safety() {
-    use std::sync::Arc;
     use std::thread;
 
-    let cache = SharedSnapshotCache::new(100, 1024 * 1024);
+    let cache = SharedSnapshotCache::with_byte_limit(100, 1024 * 1024);
     let handles: Vec<_> = (0..4)
         .map(|thread_id| {
-            let cache = Arc::clone(&cache);
+            let cache = cache.clone();
             thread::spawn(move || {
                 for i in 0..100 {
-                    let key = SnapshotKey {
-                        component_hash: format!("thread-{}", thread_id),
-                        seed: i,
-                    };
-                    cache.put(&key, vec![i as u8; 10]);
+                    let key = SnapshotKey::from_id_seed(format!("thread-{}", thread_id), i);
+                    cache.put(key.clone(), SnapshotData::new(vec![i as u8; 10]));
                     let _ = cache.get(&key);
                 }
             })
@@ -120,18 +102,14 @@ fn test_shared_snapshot_cache_thread_safety() {
 fn test_fast_reset_manager_basic() {
     let config = FastResetConfig {
         enabled: true,
-        auto_cache_initial_state: true,
-        max_cache_entries: 10,
-        max_cache_bytes: 1024 * 1024,
+        auto_cache: true,
+        max_snapshot_size: 1024 * 1024,
+        cache_capacity: 10,
+        cache_max_bytes: 1024 * 1024,
     };
 
-    let cache = SharedSnapshotCache::new(10, 1024 * 1024);
-    let manager = FastResetManager::new(config, cache);
-
-    let key = SnapshotKey {
-        component_hash: "env".to_string(),
-        seed: 42,
-    };
+    let mut manager = FastResetManager::new(config);
+    let key = SnapshotKey::from_id_seed("env", 42);
 
     // Cache a snapshot
     let snapshot = vec![1, 2, 3, 4, 5];
@@ -146,8 +124,7 @@ fn test_fast_reset_manager_basic() {
 #[test]
 fn test_fast_reset_metrics() {
     let config = FastResetConfig::default();
-    let cache = SharedSnapshotCache::new(10, 1024 * 1024);
-    let mut manager = FastResetManager::new(config, cache);
+    let mut manager = FastResetManager::new(config);
 
     // Simulate some resets
     manager.record_full_reset(Duration::from_millis(100));
@@ -164,19 +141,16 @@ fn test_fast_reset_metrics() {
 fn test_fast_reset_disabled() {
     let config = FastResetConfig {
         enabled: false,
-        auto_cache_initial_state: false,
-        max_cache_entries: 0,
-        max_cache_bytes: 0,
+        auto_cache: false,
+        max_snapshot_size: 0,
+        cache_capacity: 0,
+        cache_max_bytes: 0,
     };
 
-    let cache = SharedSnapshotCache::new(0, 0);
-    let manager = FastResetManager::new(config, cache);
+    let mut manager = FastResetManager::new(config);
 
     // Should not cache when disabled
-    let key = SnapshotKey {
-        component_hash: "env".to_string(),
-        seed: 42,
-    };
+    let key = SnapshotKey::from_id_seed("env", 42);
     manager.cache_initial_state(&key, vec![1, 2, 3]);
 
     assert!(manager.get_cached_state(&key).is_none());
@@ -195,9 +169,10 @@ fn test_replay_recorder_basic() {
         snapshot_interval: 10,
         max_snapshots: 5,
         record_observations: false,
+        ..Default::default()
     };
 
-    let mut recorder = ReplayRecorder::new(0, config);
+    let mut recorder = ReplayRecorder::new(InstanceHandle { id: 0 }, config);
 
     // Record initial state
     recorder.record_initial_state(vec![1, 2, 3], 42);
@@ -248,17 +223,17 @@ fn test_replay_data_serialization() {
     use wasmrl_runtime::{ReplayData, ReplayRecorder};
 
     let config = ReplayConfig::default();
-    let mut recorder = ReplayRecorder::new(0, config);
+    let mut recorder = ReplayRecorder::new(InstanceHandle { id: 0 }, config);
 
     recorder.record_initial_state(vec![1, 2, 3], 42);
     recorder.record_action(vec![4], 1.0, true, false);
 
-    let data = recorder.to_replay_data();
+    let data = recorder.to_replay_data().unwrap();
     let json = serde_json::to_string(&data).unwrap();
 
     // Should be able to round-trip
     let parsed: ReplayData = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.seed, 42);
+    assert_eq!(parsed.initial_seed, 42);
     assert_eq!(parsed.actions.len(), 1);
 }
 
@@ -270,13 +245,8 @@ fn test_replay_data_serialization() {
 fn test_fast_reset_performance_simulation() {
     // Simulate the performance benefit of fast reset
     let config = FastResetConfig::default();
-    let cache = SharedSnapshotCache::new(100, 10 * 1024 * 1024);
-    let mut manager = FastResetManager::new(config, cache);
-
-    let key = SnapshotKey {
-        component_hash: "counter_env".to_string(),
-        seed: 12345,
-    };
+    let mut manager = FastResetManager::new(config);
+    let key = SnapshotKey::from_id_seed("counter_env", 12345);
 
     // First reset is "full" - expensive
     let full_reset_time = Duration::from_millis(50);
@@ -314,8 +284,7 @@ fn test_fast_reset_performance_simulation() {
 fn test_reset_heavy_scenario() {
     // Simulate a reset-heavy workload (short episodes)
     let config = FastResetConfig::default();
-    let cache = SharedSnapshotCache::new(50, 5 * 1024 * 1024);
-    let mut manager = FastResetManager::new(config, cache);
+    let mut manager = FastResetManager::new(config);
 
     let episode_length = 10; // Short episodes
     let num_episodes = 100;
@@ -324,10 +293,7 @@ fn test_reset_heavy_scenario() {
     let mut total_fast_reset_time = Duration::ZERO;
 
     for episode in 0..num_episodes {
-        let key = SnapshotKey {
-            component_hash: "reset_heavy_env".to_string(),
-            seed: episode as u64,
-        };
+        let key = SnapshotKey::from_id_seed("reset_heavy_env", episode as u64);
 
         // First time seeing this seed - full reset
         if manager.get_cached_state(&key).is_none() {
@@ -364,42 +330,29 @@ fn test_reset_heavy_scenario() {
 
 #[test]
 fn test_cache_hit_rate_tracking() {
-    let mut cache = SnapshotCache::new(10, 1024 * 1024);
+    let mut cache = SnapshotCache::with_byte_limit(10, 1024 * 1024);
 
     // Insert some entries
     for i in 0..5u64 {
-        let key = SnapshotKey {
-            component_hash: "env".to_string(),
-            seed: i,
-        };
-        cache.put(&key, vec![i as u8; 10]);
+        let key = SnapshotKey::from_id_seed("env", i);
+        cache.put(key, SnapshotData::new(vec![i as u8; 10]));
     }
 
     // 5 hits
     for i in 0..5u64 {
-        let key = SnapshotKey {
-            component_hash: "env".to_string(),
-            seed: i,
-        };
+        let key = SnapshotKey::from_id_seed("env", i);
         cache.get(&key);
     }
 
     // 3 misses
     for i in 10..13u64 {
-        let key = SnapshotKey {
-            component_hash: "env".to_string(),
-            seed: i,
-        };
+        let key = SnapshotKey::from_id_seed("env", i);
         cache.get(&key);
     }
 
     let hit_rate = cache.hit_rate();
     // 5 hits / 8 total = 62.5%
-    assert!(
-        hit_rate > 0.5 && hit_rate < 0.7,
-        "hit_rate = {}",
-        hit_rate
-    );
+    assert!(hit_rate > 0.5 && hit_rate < 0.7, "hit_rate = {}", hit_rate);
 }
 
 // ============================================================================
@@ -415,9 +368,10 @@ fn test_replay_from_checkpoint() {
         snapshot_interval: 5,
         max_snapshots: 10,
         record_observations: true,
+        ..Default::default()
     };
 
-    let mut recorder = ReplayRecorder::new(0, config);
+    let mut recorder = ReplayRecorder::new(InstanceHandle { id: 0 }, config);
 
     // Initial state
     recorder.record_initial_state(vec![0; 100], 42);
@@ -432,12 +386,7 @@ fn test_replay_from_checkpoint() {
     }
 
     // Find checkpoint closest to step 12
-    let replay_data = recorder.to_replay_data();
-    let checkpoint = replay_data
-        .checkpoints
-        .iter()
-        .filter(|c| c.step <= 12)
-        .last();
+    let checkpoint = recorder.get_checkpoint_before(12);
 
     assert!(checkpoint.is_some());
     println!(
@@ -453,16 +402,13 @@ fn test_replay_from_checkpoint() {
 #[test]
 fn test_cache_under_memory_pressure() {
     // Very small cache (10KB)
-    let mut cache = SnapshotCache::new(1000, 10 * 1024);
+    let mut cache = SnapshotCache::with_byte_limit(1000, 10 * 1024);
 
     // Insert large entries until eviction
     let mut inserted = 0;
     for i in 0..100u64 {
-        let key = SnapshotKey {
-            component_hash: "env".to_string(),
-            seed: i,
-        };
-        cache.put(&key, vec![i as u8; 1024]); // 1KB each
+        let key = SnapshotKey::from_id_seed("env", i);
+        cache.put(key, SnapshotData::new(vec![i as u8; 1024])); // 1KB each
         inserted += 1;
     }
 
@@ -484,45 +430,28 @@ fn test_cache_under_memory_pressure() {
 #[test]
 fn test_cache_eviction_order() {
     // Cache with LRU eviction
-    let mut cache = SnapshotCache::new(3, 1024 * 1024);
+    let mut cache = SnapshotCache::with_byte_limit(3, 1024 * 1024);
 
     // Insert A, B, C
     for (i, name) in ["A", "B", "C"].iter().enumerate() {
-        let key = SnapshotKey {
-            component_hash: name.to_string(),
-            seed: 0,
-        };
-        cache.put(&key, vec![i as u8]);
+        let key = SnapshotKey::from_id_seed(*name, 0);
+        cache.put(key, SnapshotData::new(vec![i as u8]));
     }
 
     // Access A (makes it recently used)
-    let key_a = SnapshotKey {
-        component_hash: "A".to_string(),
-        seed: 0,
-    };
+    let key_a = SnapshotKey::from_id_seed("A", 0);
     cache.get(&key_a);
 
     // Insert D - should evict B (least recently used)
-    let key_d = SnapshotKey {
-        component_hash: "D".to_string(),
-        seed: 0,
-    };
-    cache.put(&key_d, vec![3]);
+    let key_d = SnapshotKey::from_id_seed("D", 0);
+    cache.put(key_d.clone(), SnapshotData::new(vec![3]));
 
     // A, C, D should exist; B should be evicted
-    let key_b = SnapshotKey {
-        component_hash: "B".to_string(),
-        seed: 0,
-    };
+    let key_b = SnapshotKey::from_id_seed("B", 0);
     assert!(cache.get(&key_a).is_some(), "A should exist");
     assert!(cache.get(&key_b).is_none(), "B should be evicted");
     assert!(
-        cache
-            .get(&SnapshotKey {
-                component_hash: "C".to_string(),
-                seed: 0
-            })
-            .is_some(),
+        cache.get(&SnapshotKey::from_id_seed("C", 0)).is_some(),
         "C should exist"
     );
     assert!(cache.get(&key_d).is_some(), "D should exist");

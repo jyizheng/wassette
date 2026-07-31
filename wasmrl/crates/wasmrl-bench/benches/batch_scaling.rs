@@ -6,12 +6,14 @@
 //! Measures how throughput scales with the number of parallel environments.
 //! Tests the efficiency of batching at various scales.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::time::Duration;
+
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use wasmrl_runtime::{EnvConfig, EnvFactory, WasmEnvInstance};
 use wasmrl_wit::{DType, Tensor};
 
-const COUNTER_ENV_PATH: &str = "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
+const COUNTER_ENV_PATH: &str =
+    "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
 
 /// Create a simple action tensor.
 fn make_action(value: i32) -> Tensor {
@@ -36,30 +38,26 @@ fn bench_step_scaling(c: &mut Criterion) {
     // Test various batch sizes
     for num_envs in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512] {
         group.throughput(Throughput::Elements(num_envs as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_envs),
-            &num_envs,
-            |b, &n| {
-                let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
-                    .map(|_| factory.create(&component_bytes, &config).unwrap())
+        group.bench_with_input(BenchmarkId::from_parameter(num_envs), &num_envs, |b, &n| {
+            let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
+                .map(|_| factory.create(&component_bytes, &config).unwrap())
+                .collect();
+
+            for instance in &mut instances {
+                instance.init().unwrap();
+            }
+
+            let actions: Vec<Tensor> = (0..n).map(|_| make_action(1)).collect();
+
+            b.iter(|| {
+                let results: Vec<_> = instances
+                    .iter_mut()
+                    .zip(actions.iter())
+                    .map(|(inst, action)| inst.step(black_box(action)).unwrap())
                     .collect();
-
-                for instance in &mut instances {
-                    instance.init().unwrap();
-                }
-
-                let actions: Vec<Tensor> = (0..n).map(|_| make_action(1)).collect();
-
-                b.iter(|| {
-                    let results: Vec<_> = instances
-                        .iter_mut()
-                        .zip(actions.iter())
-                        .map(|(inst, action)| inst.step(black_box(action)).unwrap())
-                        .collect();
-                    black_box(results);
-                });
-            },
-        );
+                black_box(results);
+            });
+        });
     }
 
     group.finish();
@@ -81,32 +79,28 @@ fn bench_reset_scaling(c: &mut Criterion) {
 
     for num_envs in [1, 2, 4, 8, 16, 32, 64, 128, 256] {
         group.throughput(Throughput::Elements(num_envs as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(num_envs),
-            &num_envs,
-            |b, &n| {
-                let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
-                    .map(|_| factory.create(&component_bytes, &config).unwrap())
-                    .collect();
+        group.bench_with_input(BenchmarkId::from_parameter(num_envs), &num_envs, |b, &n| {
+            let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
+                .map(|_| factory.create(&component_bytes, &config).unwrap())
+                .collect();
 
-                // Get snapshots
-                for instance in &mut instances {
-                    instance.init().unwrap();
+            // Get snapshots
+            for instance in &mut instances {
+                instance.init().unwrap();
+            }
+            let snapshots: Vec<_> = instances
+                .iter()
+                .map(|inst| inst.snapshot().unwrap())
+                .collect();
+
+            b.iter(|| {
+                // Batch restore
+                for (inst, snapshot) in instances.iter_mut().zip(snapshots.iter()) {
+                    inst.restore(black_box(snapshot)).unwrap();
                 }
-                let snapshots: Vec<_> = instances
-                    .iter()
-                    .map(|inst| inst.snapshot().unwrap())
-                    .collect();
-
-                b.iter(|| {
-                    // Batch restore
-                    for (inst, snapshot) in instances.iter_mut().zip(snapshots.iter()) {
-                        inst.restore(black_box(snapshot)).unwrap();
-                    }
-                    black_box(&instances);
-                });
-            },
-        );
+                black_box(&instances);
+            });
+        });
     }
 
     group.finish();

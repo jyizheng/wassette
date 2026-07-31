@@ -100,7 +100,9 @@ pub use fast_reset::{FastResetConfig, FastResetManager, FastResetMetrics, ResetR
 pub use instance::{InstanceHandle, InstanceInfo, InstanceStatus};
 pub use metrics::{LatencyStats, MetricsSummary, RuntimeMetrics, Timer};
 pub use pool::{InstancePool, PoolStats, SharedPool};
-pub use replay::{Checkpoint, RecordedAction, ReplayConfig, ReplayData, ReplayManager, ReplayRecorder};
+pub use replay::{
+    Checkpoint, RecordedAction, ReplayConfig, ReplayData, ReplayManager, ReplayRecorder,
+};
 pub use snapshot_cache::{CachedSnapshot, SharedSnapshotCache, SnapshotCache, SnapshotKey};
 
 #[cfg(test)]
@@ -172,7 +174,7 @@ mod tests {
             .max_memory_mb(256)
             .fuel_per_step(1_000_000);
 
-        assert_eq!(builder.config.max_instances, 128);
+        assert_eq!(builder.config().max_instances, 128);
     }
 
     #[test]
@@ -189,4 +191,3 @@ mod tests {
         assert_eq!(stats.active, 0);
     }
 }
-

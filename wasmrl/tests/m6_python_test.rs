@@ -50,36 +50,38 @@ fn test_py_tensor_dtype_mismatch() {
 fn test_py_env_config_default() {
     let config = PyEnvConfig::default();
     assert_eq!(config.num_envs, 1);
-    assert_eq!(config.max_memory_mb, 64);
+    assert_eq!(config.max_memory_mb, 256);
     assert!(config.fuel_per_step > 0);
 }
 
 #[test]
 fn test_py_env_config_custom() {
     let config = PyEnvConfig {
+        config_json: "{}".to_string(),
         num_envs: 8,
         max_memory_mb: 128,
         fuel_per_step: 2_000_000,
         timeout_step_ms: 200,
+        timeout_reset_ms: 500,
         auto_reset: false,
-        seed: Some(42),
+        seed: 42,
     };
     assert_eq!(config.num_envs, 8);
     assert_eq!(config.max_memory_mb, 128);
-    assert_eq!(config.seed, Some(42));
+    assert_eq!(config.seed, 42);
 }
 
 #[test]
 fn test_py_wasmrl_error_display() {
     let err = PyWasmRLError::NotInitialized;
     assert!(format!("{}", err).contains("not initialized"));
-    
+
     let err = PyWasmRLError::InvalidAction("bad action".into());
     assert!(format!("{}", err).contains("bad action"));
-    
+
     let err = PyWasmRLError::RuntimeError("runtime error".into());
     assert!(format!("{}", err).contains("runtime error"));
-    
+
     let err = PyWasmRLError::EnvClosed;
     assert!(format!("{}", err).contains("closed"));
 }
@@ -87,8 +89,8 @@ fn test_py_wasmrl_error_display() {
 #[test]
 fn test_py_wasmrl_error_conversion() {
     // Ensure errors can be converted to PyErr
-    pyo3::prepare_freethreaded_python();
-    pyo3::Python::with_gil(|py| {
+    pyo3::Python::initialize();
+    pyo3::Python::attach(|py| {
         let err: pyo3::PyErr = PyWasmRLError::NotInitialized.into();
         // Just verify the conversion doesn't panic
         let _ = err.to_string();
@@ -103,28 +105,32 @@ mod space_tests {
         let low = vec![-1.0f32, -1.0, -1.0];
         let high = vec![1.0f32, 1.0, 1.0];
         let shape = vec![3usize];
-        
+
         // Value in bounds
         let val = vec![0.0f32, 0.5, -0.5];
-        assert!(val.iter().zip(low.iter().zip(high.iter()))
+        assert!(val
+            .iter()
+            .zip(low.iter().zip(high.iter()))
             .all(|(v, (l, h))| v >= l && v <= h));
-        
+
         // Value out of bounds
         let val = vec![2.0f32, 0.0, 0.0];
-        assert!(!val.iter().zip(low.iter().zip(high.iter()))
+        assert!(!val
+            .iter()
+            .zip(low.iter().zip(high.iter()))
             .all(|(v, (l, h))| v >= l && v <= h));
     }
-    
+
     #[test]
     fn test_discrete_space_contains_logic() {
         let n = 5i64;
         let start = 0i64;
-        
+
         // Values in range
         for i in 0..5 {
             assert!(i >= start && i < start + n);
         }
-        
+
         // Value out of range
         assert!(!(5 >= start && 5 < start + n));
         assert!(!(-1 >= start && -1 < start + n));
@@ -134,21 +140,22 @@ mod space_tests {
 // Config conversion tests
 mod config_tests {
     use super::*;
-    use wasmrl_runtime::EnvConfig;
-    
+
     #[test]
     fn test_config_to_env_config() {
         let py_config = PyEnvConfig {
+            config_json: r#"{"seed": 123}"#.to_string(),
             num_envs: 4,
             max_memory_mb: 32,
             fuel_per_step: 500_000,
             timeout_step_ms: 50,
+            timeout_reset_ms: 250,
             auto_reset: true,
-            seed: Some(123),
+            seed: 123,
         };
-        
+
         let env_config = py_config.to_env_config();
-        assert_eq!(env_config.seed, Some(123));
+        assert_eq!(env_config.config_json, r#"{"seed": 123}"#);
     }
 }
 
@@ -159,7 +166,7 @@ mod vecenv_tests {
         let num_envs = 8;
         let mut episode_rewards: Vec<f64> = vec![0.0; num_envs];
         let mut episode_lengths: Vec<u64> = vec![0; num_envs];
-        
+
         // Simulate steps
         for _ in 0..10 {
             for i in 0..num_envs {
@@ -167,16 +174,16 @@ mod vecenv_tests {
                 episode_lengths[i] += 1;
             }
         }
-        
+
         assert!(episode_rewards.iter().all(|&r| r == 10.0));
         assert!(episode_lengths.iter().all(|&l| l == 10));
     }
-    
+
     #[test]
     fn test_auto_reset_logic() {
         let mut dones = vec![false, true, false, true];
         let auto_reset = true;
-        
+
         // Simulate auto-reset
         for (i, done) in dones.iter_mut().enumerate() {
             if *done && auto_reset {
@@ -184,15 +191,15 @@ mod vecenv_tests {
                 *done = false; // After reset
             }
         }
-        
+
         assert!(dones.iter().all(|&d| !d));
     }
-    
+
     #[test]
     fn test_action_batch_size_validation() {
         let num_envs = 4;
         let actions: Vec<i32> = vec![1, 2, 3, 4];
-        
+
         assert_eq!(actions.len(), num_envs);
     }
 }
@@ -201,7 +208,7 @@ mod vecenv_tests {
 #[cfg(feature = "integration")]
 mod integration_tests {
     use super::*;
-    
+
     #[test]
     fn test_full_vecenv_lifecycle() {
         // Would test with actual Wasm component

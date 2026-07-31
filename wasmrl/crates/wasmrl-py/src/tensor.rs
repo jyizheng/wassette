@@ -3,10 +3,11 @@
 
 //! Tensor conversion between Python/NumPy and WasmRL.
 
-use crate::error::{PyWasmRLError, PyWasmRLResult};
-use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use wasmrl_wit::{DType, Tensor};
+
+use crate::error::{PyWasmRLError, PyWasmRLResult};
 
 /// Python tensor wrapper for conversions.
 #[derive(Debug, Clone)]
@@ -140,20 +141,24 @@ pub fn numpy_to_action_tensor(
 
     // Try as numpy array
     if let Ok(arr) = action.extract::<PyReadonlyArray1<i32>>() {
-        let data: Vec<u8> = arr.as_slice()?.iter().flat_map(|x| x.to_le_bytes()).collect();
-        return Ok(Tensor::new(DType::Int32, vec![arr.len() as u32], data));
+        let slice = arr.as_slice()?;
+        let data: Vec<u8> = slice.iter().flat_map(|x| x.to_le_bytes()).collect();
+        return Ok(Tensor::new(DType::Int32, vec![slice.len() as u32], data));
     }
     if let Ok(arr) = action.extract::<PyReadonlyArray1<i64>>() {
-        let data: Vec<u8> = arr.as_slice()?.iter().flat_map(|x| x.to_le_bytes()).collect();
-        return Ok(Tensor::new(DType::Int64, vec![arr.len() as u32], data));
+        let slice = arr.as_slice()?;
+        let data: Vec<u8> = slice.iter().flat_map(|x| x.to_le_bytes()).collect();
+        return Ok(Tensor::new(DType::Int64, vec![slice.len() as u32], data));
     }
     if let Ok(arr) = action.extract::<PyReadonlyArray1<f32>>() {
-        let data: Vec<u8> = arr.as_slice()?.iter().flat_map(|x| x.to_le_bytes()).collect();
-        return Ok(Tensor::new(DType::Float32, vec![arr.len() as u32], data));
+        let slice = arr.as_slice()?;
+        let data: Vec<u8> = slice.iter().flat_map(|x| x.to_le_bytes()).collect();
+        return Ok(Tensor::new(DType::Float32, vec![slice.len() as u32], data));
     }
     if let Ok(arr) = action.extract::<PyReadonlyArray1<f64>>() {
-        let data: Vec<u8> = arr.as_slice()?.iter().flat_map(|x| x.to_le_bytes()).collect();
-        return Ok(Tensor::new(DType::Float64, vec![arr.len() as u32], data));
+        let slice = arr.as_slice()?;
+        let data: Vec<u8> = slice.iter().flat_map(|x| x.to_le_bytes()).collect();
+        return Ok(Tensor::new(DType::Float64, vec![slice.len() as u32], data));
     }
 
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -209,9 +214,7 @@ pub fn numpy_batch_to_action_tensors(
         let action_dim = shape[1];
         return Ok((0..num_envs)
             .map(|i| {
-                let row: Vec<f32> = (0..action_dim)
-                    .map(|j| *arr.get([i, j]).unwrap())
-                    .collect();
+                let row: Vec<f32> = (0..action_dim).map(|j| *arr.get([i, j]).unwrap()).collect();
                 let data: Vec<u8> = row.iter().flat_map(|x| x.to_le_bytes()).collect();
                 Tensor::new(DType::Float32, vec![action_dim as u32], data)
             })
@@ -219,7 +222,7 @@ pub fn numpy_batch_to_action_tensors(
     }
 
     // Try as Python list
-    if let Ok(list) = actions.downcast::<pyo3::types::PyList>() {
+    if let Ok(list) = actions.cast::<pyo3::types::PyList>() {
         if list.len() != num_envs {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "Expected {} actions, got {}",
@@ -240,7 +243,10 @@ pub fn numpy_batch_to_action_tensors(
 }
 
 /// Convert observation tensor to numpy array.
-pub fn tensor_to_numpy<'py>(py: Python<'py>, tensor: &Tensor) -> PyResult<Bound<'py, PyArray1<f32>>> {
+pub fn tensor_to_numpy<'py>(
+    py: Python<'py>,
+    tensor: &Tensor,
+) -> PyResult<Bound<'py, PyArray1<f32>>> {
     match tensor.dtype {
         DType::Float32 => {
             let data: Vec<f32> = tensor
@@ -254,7 +260,9 @@ pub fn tensor_to_numpy<'py>(py: Python<'py>, tensor: &Tensor) -> PyResult<Bound<
             let data: Vec<f32> = tensor
                 .data
                 .chunks_exact(8)
-                .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32)
+                .map(|c| {
+                    f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                })
                 .collect();
             Ok(PyArray1::from_vec(py, data))
         }
@@ -270,7 +278,9 @@ pub fn tensor_to_numpy<'py>(py: Python<'py>, tensor: &Tensor) -> PyResult<Bound<
             let data: Vec<f32> = tensor
                 .data
                 .chunks_exact(8)
-                .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32)
+                .map(|c| {
+                    i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                })
                 .collect();
             Ok(PyArray1::from_vec(py, data))
         }
@@ -325,10 +335,7 @@ pub fn stack_observations<'py>(
 
     Ok(numpy::PyArray2::from_vec2(
         py,
-        &data
-            .chunks(obs_dim)
-            .map(|c| c.to_vec())
-            .collect::<Vec<_>>(),
+        &data.chunks(obs_dim).map(|c| c.to_vec()).collect::<Vec<_>>(),
     )?)
 }
 

@@ -188,10 +188,7 @@ mod tests {
             expected: 10,
             actual: 8,
         };
-        assert_eq!(
-            err.to_string(),
-            "Batch size mismatch: expected 10, got 8"
-        );
+        assert_eq!(err.to_string(), "Batch size mismatch: expected 10, got 8");
     }
 
     #[test]

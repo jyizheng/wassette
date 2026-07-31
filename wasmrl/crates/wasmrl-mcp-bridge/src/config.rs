@@ -196,8 +196,7 @@ mod tests {
 
     #[test]
     fn test_config_serialization() {
-        let config = McpBridgeConfig::new("test.wasm")
-            .with_max_sessions(8);
+        let config = McpBridgeConfig::new("test.wasm").with_max_sessions(8);
 
         let json = serde_json::to_string(&config).unwrap();
         let parsed: McpBridgeConfig = serde_json::from_str(&json).unwrap();
