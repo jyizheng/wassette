@@ -1,0 +1,115 @@
+[package]
+name = "wasmrl-workspace"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Microsoft"]
+repository = "https://github.com/microsoft/wassette"
+publish = false
+
+[workspace]
+members = [
+    "crates/wasmrl-wit",
+    "crates/wasmrl-runtime",
+    "crates/wasmrl-sdk-rust",
+    "crates/wasmrl-policy",
+    "crates/wasmrl-py",
+    "crates/wasmrl-bench",
+    "crates/wasmrl-mcp-bridge",
+    "crates/wasmrl-comparison",
+    "envs/counter_env",
+    "envs/security_suite/malicious_loop_env",
+    "envs/security_suite/malicious_memory_env",
+    "envs/reset_heavy_env",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Microsoft"]
+repository = "https://github.com/microsoft/wassette"
+
+[workspace.dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+wasmtime = "38.0.4"
+wasmtime-wasi = "38.0.4"
+tracing = "0.1"
+
+toml = "0.8"
+pyo3 = "0.29"
+numpy = "0.29"
+rand = "0.8"
+criterion = "0.5"
+
+# Internal crate dependencies
+wasmrl-wit = { path = "crates/wasmrl-wit" }
+wasmrl-runtime = { path = "crates/wasmrl-runtime" }
+wasmrl-sdk-rust = { path = "crates/wasmrl-sdk-rust" }
+wasmrl-policy = { path = "crates/wasmrl-policy" }
+wasmrl-py = { path = "crates/wasmrl-py" }
+wasmrl-bench = { path = "crates/wasmrl-bench" }
+wasmrl-mcp-bridge = { path = "crates/wasmrl-mcp-bridge" }
+wasmrl-comparison = { path = "crates/wasmrl-comparison" }
+
+[features]
+integration = []
+
+[[test]]
+name = "integration_test"
+path = "tests/integration_test.rs"
+
+[[test]]
+name = "determinism_test"
+path = "tests/determinism_test.rs"
+
+[[test]]
+name = "m3_runtime_test"
+path = "tests/m3_runtime_test.rs"
+
+[[test]]
+name = "m4_fast_reset_test"
+path = "tests/m4_fast_reset_test.rs"
+
+[[test]]
+name = "m5_policy_test"
+path = "tests/m5_policy_test.rs"
+
+[[test]]
+name = "m6_python_test"
+path = "tests/m6_python_test.rs"
+
+[[test]]
+name = "m7_benchmark_test"
+path = "tests/m7_benchmark_test.rs"
+
+[[test]]
+name = "m8_mcp_bridge_test"
+path = "tests/m8_mcp_bridge_test.rs"
+
+[[test]]
+name = "m9_comparison_test"
+path = "tests/m9_comparison_test.rs"
+
+[dev-dependencies]
+wasmrl-wit = { path = "crates/wasmrl-wit" }
+wasmrl-runtime = { path = "crates/wasmrl-runtime" }
+wasmrl-sdk-rust = { path = "crates/wasmrl-sdk-rust" }
+wasmrl-policy = { path = "crates/wasmrl-policy" }
+wasmrl-py = { path = "crates/wasmrl-py" }
+wasmrl-bench = { path = "crates/wasmrl-bench" }
+wasmrl-mcp-bridge = { path = "crates/wasmrl-mcp-bridge" }
+wasmrl-comparison = { path = "crates/wasmrl-comparison" }
+counter-env = { path = "envs/counter_env" }
+malicious-loop-env = { path = "envs/security_suite/malicious_loop_env" }
+malicious-memory-env = { path = "envs/security_suite/malicious_memory_env" }
+reset-heavy-env = { path = "envs/reset_heavy_env" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+pyo3 = { version = "0.29", features = ["auto-initialize"] }
+criterion = "0.5"

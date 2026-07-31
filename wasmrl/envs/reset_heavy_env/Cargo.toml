@@ -1,0 +1,16 @@
+[package]
+name = "reset-heavy-env"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Reset-heavy environment for benchmarking fast reset optimization"
+
+[dependencies]
+anyhow.workspace = true
+wasmrl-wit.workspace = true
+wasmrl-sdk-rust.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

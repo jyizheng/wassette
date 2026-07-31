@@ -1,4 +1,5 @@
 /target
+/wasmrl/target
 /bin
 .DS_Store
 /result

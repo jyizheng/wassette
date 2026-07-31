@@ -1,0 +1,149 @@
+// WasmRL Environment Interface v0.1.0
+//
+// This WIT package defines the interface for reinforcement learning
+// environments that run as WebAssembly components.
+//
+// Version: wasmrl:env@0.1.0
+// Stability: Frozen ABI for v0.1.x compatibility
+
+package wasmrl:env@0.1.0;
+
+/// Core environment interface that all RL environments must implement.
+interface environment {
+    /// Tensor data type enumeration.
+    /// Specifies the numeric type of tensor elements.
+    enum dtype {
+        /// 32-bit floating point
+        float32,
+        /// 64-bit floating point
+        float64,
+        /// 32-bit signed integer
+        int32,
+        /// 64-bit signed integer
+        int64,
+        /// 8-bit unsigned integer (for images, discrete actions)
+        uint8,
+        /// Boolean type
+        boolean,
+    }
+
+    /// Tensor encoding: dtype + shape + raw bytes.
+    /// This is the universal format for observations and actions.
+    record tensor {
+        /// Data type of tensor elements
+        dtype: dtype,
+        /// Shape of the tensor (e.g., [84, 84, 4] for stacked frames)
+        shape: list<u32>,
+        /// Raw bytes in row-major (C) order
+        data: list<u8>,
+    }
+
+    /// Result of a single environment step.
+    record step-result {
+        /// Next observation after taking the action
+        observation: tensor,
+        /// Reward received for the transition
+        reward: float64,
+        /// Whether the episode has terminated (goal reached or failure)
+        terminated: bool,
+        /// Whether the episode was truncated (time limit, etc.)
+        truncated: bool,
+        /// Optional info dictionary as JSON string
+        info: option<string>,
+    }
+
+    /// Environment configuration passed during initialization.
+    record env-config {
+        /// Configuration as JSON string for flexibility
+        config-json: string,
+    }
+
+    /// Environment handle returned after initialization.
+    record env-handle {
+        /// Unique identifier for this environment instance
+        id: u64,
+    }
+
+    /// Initialize the environment with configuration.
+    /// Returns an environment handle for subsequent operations.
+    init: func(config: env-config) -> result<env-handle, string>;
+
+    /// Reset the environment to initial state with given seed.
+    /// Returns the initial observation.
+    reset: func(handle: env-handle, seed: u64) -> result<tensor, string>;
+
+    /// Execute one step with the given action.
+    /// Returns step result containing observation, reward, and done flags.
+    step: func(handle: env-handle, action: tensor) -> result<step-result, string>;
+
+    /// Get the observation space specification.
+    observation-space: func(handle: env-handle) -> result<tensor, string>;
+
+    /// Get the action space specification.
+    action-space: func(handle: env-handle) -> result<tensor, string>;
+
+    /// Close and cleanup the environment instance.
+    close: func(handle: env-handle) -> result<_, string>;
+}
+
+/// Batch operations for vectorized environment execution.
+/// These are optional but recommended for high-throughput training.
+interface batch {
+    use environment.{tensor, step-result, env-handle};
+
+    /// Batched step result containing results for multiple environments.
+    record batch-step-result {
+        /// Array of observations (one per environment)
+        observations: list<tensor>,
+        /// Array of rewards (one per environment)
+        rewards: list<float64>,
+        /// Array of terminated flags
+        terminated: list<bool>,
+        /// Array of truncated flags
+        truncated: list<bool>,
+        /// Array of optional info strings
+        infos: list<option<string>>,
+    }
+
+    /// Reset multiple environments in batch.
+    /// Seeds array length must match number of environments.
+    /// Returns array of initial observations.
+    reset-batch: func(handles: list<env-handle>, seeds: list<u64>) -> result<list<tensor>, string>;
+
+    /// Step multiple environments in batch.
+    /// Actions array length must match number of environments.
+    /// Returns batched step results.
+    step-batch: func(handles: list<env-handle>, actions: list<tensor>) -> result<batch-step-result, string>;
+}
+
+/// Snapshot and restore for fast environment reset.
+/// Essential for reset-heavy workloads and deterministic replay.
+interface snapshot {
+    use environment.{env-handle};
+
+    /// Opaque snapshot data for environment state.
+    record snapshot-data {
+        /// Version tag for compatibility checking
+        version: u32,
+        /// Serialized environment state
+        data: list<u8>,
+    }
+
+    /// Capture current environment state as a snapshot.
+    snapshot: func(handle: env-handle) -> result<snapshot-data, string>;
+
+    /// Restore environment to a previously captured state.
+    restore: func(handle: env-handle, snapshot: snapshot-data) -> result<_, string>;
+}
+
+/// Complete environment world combining all interfaces.
+world env {
+    /// Core environment operations (required)
+    export environment;
+    
+    /// Batch operations (optional, recommended)
+    export batch;
+    
+    /// Snapshot/restore (optional, recommended for reset-heavy)
+    export snapshot;
+}
