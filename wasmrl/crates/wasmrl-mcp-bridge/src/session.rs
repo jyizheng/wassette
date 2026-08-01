@@ -242,7 +242,7 @@ impl SessionManager {
 
     /// Create a new session.
     pub fn create_session(&mut self, config: SessionConfig) -> BridgeResult<SessionId> {
-        if self.sessions.len() >= self.max_sessions {
+        if self.active_count() >= self.max_sessions {
             return Err(BridgeError::max_sessions_exceeded(self.max_sessions));
         }
 

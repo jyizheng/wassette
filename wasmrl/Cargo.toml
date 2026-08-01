@@ -40,6 +40,7 @@ tokio = { version = "1", features = ["full"] }
 wasmtime = "38.0.4"
 wasmtime-wasi = "38.0.4"
 tracing = "0.1"
+wit-bindgen = "0.46"
 
 toml = "0.8"
 pyo3 = "0.29"
@@ -58,7 +59,7 @@ wasmrl-mcp-bridge = { path = "crates/wasmrl-mcp-bridge" }
 wasmrl-comparison = { path = "crates/wasmrl-comparison" }
 
 [features]
-integration = []
+integration = ["wasmrl-mcp-bridge/integration"]
 
 [[test]]
 name = "integration_test"
@@ -95,6 +96,11 @@ path = "tests/m8_mcp_bridge_test.rs"
 [[test]]
 name = "m9_comparison_test"
 path = "tests/m9_comparison_test.rs"
+
+[[test]]
+name = "runtime_component_test"
+path = "tests/runtime_component_test.rs"
+required-features = ["integration"]
 
 [dev-dependencies]
 wasmrl-wit = { path = "crates/wasmrl-wit" }

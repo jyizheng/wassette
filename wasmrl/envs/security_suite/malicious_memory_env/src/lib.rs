@@ -21,6 +21,10 @@
 use serde::{Deserialize, Serialize};
 use wasmrl_sdk_rust::TensorEncoder;
 
+#[cfg(target_arch = "wasm32")]
+#[allow(warnings)]
+mod bindings;
+
 /// Configuration for malicious memory behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaliciousMemoryConfig {
@@ -171,6 +175,192 @@ pub struct StepOutput {
     pub truncated: bool,
     /// Info.
     pub info: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+mod component {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    use bindings::exports::wasmrl::env::{batch, environment, snapshot};
+
+    use super::{bindings, MaliciousMemoryEnv};
+
+    struct Component;
+
+    #[derive(Default)]
+    struct Environments {
+        next_id: u64,
+        environments: HashMap<u64, MaliciousMemoryEnv>,
+    }
+
+    static ENVIRONMENTS: OnceLock<Mutex<Environments>> = OnceLock::new();
+
+    fn environments() -> &'static Mutex<Environments> {
+        ENVIRONMENTS.get_or_init(|| {
+            Mutex::new(Environments {
+                next_id: 1,
+                environments: HashMap::new(),
+            })
+        })
+    }
+
+    fn with_env<T>(
+        handle: environment::EnvHandle,
+        operation: impl FnOnce(&mut MaliciousMemoryEnv) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut registry = environments()
+            .lock()
+            .map_err(|_| "environment registry lock poisoned".to_string())?;
+        let env = registry
+            .environments
+            .get_mut(&handle.id)
+            .ok_or_else(|| format!("environment handle {} not found", handle.id))?;
+        operation(env)
+    }
+
+    fn observation(data: Vec<u8>) -> environment::Tensor {
+        environment::Tensor {
+            dtype: environment::Dtype::Float32,
+            shape: vec![1],
+            data,
+        }
+    }
+
+    fn action_space() -> environment::Tensor {
+        environment::Tensor {
+            dtype: environment::Dtype::Int32,
+            shape: vec![1],
+            data: 1_i32.to_le_bytes().to_vec(),
+        }
+    }
+
+    impl environment::Guest for Component {
+        fn init(config: environment::EnvConfig) -> Result<environment::EnvHandle, String> {
+            let mut env = MaliciousMemoryEnv::new();
+            env.init(&config.config_json)?;
+
+            let mut registry = environments()
+                .lock()
+                .map_err(|_| "environment registry lock poisoned".to_string())?;
+            let id = registry.next_id;
+            registry.next_id = registry.next_id.wrapping_add(1).max(1);
+            registry.environments.insert(id, env);
+            Ok(environment::EnvHandle { id })
+        }
+
+        fn reset(handle: environment::EnvHandle, seed: u64) -> Result<environment::Tensor, String> {
+            with_env(handle, |env| env.reset(seed).map(observation))
+        }
+
+        fn step(
+            handle: environment::EnvHandle,
+            action: environment::Tensor,
+        ) -> Result<environment::StepResult, String> {
+            if action.dtype != environment::Dtype::Int32
+                || action.shape.as_slice() != [1]
+                || action.data.len() != 4
+            {
+                return Err("action must be an int32 tensor with shape [1]".to_string());
+            }
+
+            with_env(handle, |env| {
+                let result = env.step(&action.data)?;
+                Ok(environment::StepResult {
+                    observation: observation(result.observation),
+                    reward: result.reward,
+                    terminated: result.terminated,
+                    truncated: result.truncated,
+                    info: result.info,
+                })
+            })
+        }
+
+        fn observation_space(
+            handle: environment::EnvHandle,
+        ) -> Result<environment::Tensor, String> {
+            with_env(handle, |_| Ok(observation(vec![0; 4])))
+        }
+
+        fn action_space(handle: environment::EnvHandle) -> Result<environment::Tensor, String> {
+            with_env(handle, |_| Ok(action_space()))
+        }
+
+        fn close(handle: environment::EnvHandle) -> Result<(), String> {
+            let mut registry = environments()
+                .lock()
+                .map_err(|_| "environment registry lock poisoned".to_string())?;
+            let mut env = registry
+                .environments
+                .remove(&handle.id)
+                .ok_or_else(|| format!("environment handle {} not found", handle.id))?;
+            env.close()
+        }
+    }
+
+    impl batch::Guest for Component {
+        fn reset_batch(
+            handles: Vec<environment::EnvHandle>,
+            seeds: Vec<u64>,
+        ) -> Result<Vec<environment::Tensor>, String> {
+            if handles.len() != seeds.len() {
+                return Err("batch size mismatch".to_string());
+            }
+            handles
+                .into_iter()
+                .zip(seeds)
+                .map(|(handle, seed)| <Self as environment::Guest>::reset(handle, seed))
+                .collect()
+        }
+
+        fn step_batch(
+            handles: Vec<environment::EnvHandle>,
+            actions: Vec<environment::Tensor>,
+        ) -> Result<batch::BatchStepResult, String> {
+            if handles.len() != actions.len() {
+                return Err("batch size mismatch".to_string());
+            }
+            let mut batch = batch::BatchStepResult {
+                observations: Vec::with_capacity(handles.len()),
+                rewards: Vec::with_capacity(handles.len()),
+                terminated: Vec::with_capacity(handles.len()),
+                truncated: Vec::with_capacity(handles.len()),
+                infos: Vec::with_capacity(handles.len()),
+            };
+            for (handle, action) in handles.into_iter().zip(actions) {
+                let result = <Self as environment::Guest>::step(handle, action)?;
+                batch.observations.push(result.observation);
+                batch.rewards.push(result.reward);
+                batch.terminated.push(result.terminated);
+                batch.truncated.push(result.truncated);
+                batch.infos.push(result.info);
+            }
+            Ok(batch)
+        }
+    }
+
+    impl snapshot::Guest for Component {
+        fn snapshot(handle: environment::EnvHandle) -> Result<snapshot::SnapshotData, String> {
+            with_env(handle, |env| {
+                Ok(snapshot::SnapshotData {
+                    version: 1,
+                    data: env.snapshot()?,
+                })
+            })
+        }
+
+        fn restore(
+            handle: environment::EnvHandle,
+            data: snapshot::SnapshotData,
+        ) -> Result<(), String> {
+            if data.version != 1 {
+                return Err(format!("unsupported snapshot version {}", data.version));
+            }
+            with_env(handle, |env| env.restore(&data.data))
+        }
+    }
+
+    bindings::export!(Component with_types_in bindings);
 }
 
 #[cfg(test)]

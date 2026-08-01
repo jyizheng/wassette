@@ -18,7 +18,7 @@ fn test_py_tensor_roundtrip_i32() {
 
 #[test]
 fn test_py_tensor_roundtrip_f32() {
-    let original = vec![1.0f32, 2.5, 3.14, 4.0, 5.5];
+    let original = vec![1.0f32, 2.5, 3.125, 4.0, 5.5];
     let tensor = PyTensor::from_f32_array(&original);
     let recovered = tensor.to_f32_vec().unwrap();
     assert_eq!(original, recovered);

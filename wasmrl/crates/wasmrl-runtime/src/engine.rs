@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use wasmtime::component::{Component, Linker};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::config::RuntimeConfig;
@@ -24,18 +24,40 @@ pub struct EnvState {
     wasi: WasiCtx,
     /// Component resource table for WASI-owned resources.
     table: ResourceTable,
+    /// Per-store resource limits enforced by Wasmtime.
+    limits: StoreLimits,
+    /// Configured linear-memory limit in bytes.
+    memory_limit_bytes: usize,
 }
 
 impl EnvState {
     /// Create a new empty state.
     pub fn new() -> Self {
+        Self::with_memory_limit(usize::MAX)
+    }
+
+    /// Create state with a maximum size for each linear memory.
+    pub fn with_memory_limit(memory_limit_bytes: usize) -> Self {
+        let mut limits = StoreLimitsBuilder::new();
+        if memory_limit_bytes != usize::MAX {
+            limits = limits
+                .memory_size(memory_limit_bytes)
+                .trap_on_grow_failure(true);
+        }
         Self {
             fuel_consumed: 0,
             trapped: false,
             last_error: None,
             wasi: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
+            limits: limits.build(),
+            memory_limit_bytes,
         }
+    }
+
+    /// Return the configured linear-memory limit in bytes.
+    pub fn memory_limit_bytes(&self) -> usize {
+        self.memory_limit_bytes
     }
 
     /// Record that a trap occurred.
@@ -72,6 +94,7 @@ impl std::fmt::Debug for EnvState {
             .field("fuel_consumed", &self.fuel_consumed)
             .field("trapped", &self.trapped)
             .field("last_error", &self.last_error)
+            .field("memory_limit_bytes", &self.memory_limit_bytes)
             .field("wasi", &"<WasiCtx>")
             .field("table", &"<ResourceTable>")
             .finish()
@@ -101,7 +124,10 @@ impl EngineContext {
         }
 
         // Configure epoch interruption if enabled
-        if runtime_config.enable_epoch_interruption {
+        let epoch_interruption = runtime_config.enable_epoch_interruption
+            || runtime_config.step_timeout.is_some()
+            || runtime_config.reset_timeout.is_some();
+        if epoch_interruption {
             config.epoch_interruption(true);
         }
 
@@ -110,6 +136,18 @@ impl EngineContext {
         config.memory_reservation_for_growth(1024 * 1024 * 1024); // 1 GB reserve
 
         let engine = Arc::new(Engine::new(&config)?);
+        if epoch_interruption {
+            let weak_engine = Arc::downgrade(&engine);
+            std::thread::Builder::new()
+                .name("wasmrl-epoch-ticker".to_string())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    let Some(engine) = weak_engine.upgrade() else {
+                        break;
+                    };
+                    engine.increment_epoch();
+                })?;
+        }
 
         // Create linker with WASI support
         let mut linker = Linker::new(engine.as_ref());
@@ -143,12 +181,14 @@ impl EngineContext {
 
     /// Create a new store with the given state.
     pub fn create_store(&self, state: EnvState) -> Store<EnvState> {
-        Store::new(self.engine.as_ref(), state)
+        let mut store = Store::new(self.engine.as_ref(), state);
+        store.limiter(|state| &mut state.limits);
+        store
     }
 
     /// Create a new store with fuel limit.
     pub fn create_store_with_fuel(&self, state: EnvState, fuel: u64) -> Result<Store<EnvState>> {
-        let mut store = Store::new(self.engine.as_ref(), state);
+        let mut store = self.create_store(state);
         store.set_fuel(fuel)?;
         Ok(store)
     }
@@ -173,6 +213,12 @@ mod tests {
         assert_eq!(state.fuel_consumed, 0);
         assert!(!state.trapped);
         assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn test_env_state_memory_limit() {
+        let state = EnvState::with_memory_limit(64 * 1024 * 1024);
+        assert_eq!(state.memory_limit_bytes(), 64 * 1024 * 1024);
     }
 
     #[test]

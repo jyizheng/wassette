@@ -9,15 +9,15 @@ use numpy::PyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use wasmrl_runtime::{ComponentRef, EnvRuntime, InstanceHandle, WasmEnvFactory};
-use wasmrl_wit::{EnvConfig, SnapshotData};
+use wasmrl_wit::{EnvConfig, SnapshotData, Tensor};
 
 use crate::config::PyEnvConfig;
 use crate::error::PyWasmRLError;
-use crate::spaces::{make_box_space, make_discrete_space, PySpace};
+use crate::spaces::{make_tensor_action_space, make_tensor_box_space};
 use crate::tensor::{numpy_to_action_tensor, tensor_to_numpy};
 
 /// Single WasmRL environment wrapper for Python.
-#[pyclass(name = "WasmEnv")]
+#[pyclass(name = "WasmEnv", unsendable)]
 pub struct PyWasmEnv {
     /// Runtime used for environment calls.
     runtime: EnvRuntime,
@@ -27,10 +27,14 @@ pub struct PyWasmEnv {
     config: EnvConfig,
     /// Observation space.
     #[pyo3(get)]
-    observation_space: Py<PySpace>,
+    observation_space: Py<PyAny>,
     /// Action space.
     #[pyo3(get)]
-    action_space: Py<PySpace>,
+    action_space: Py<PyAny>,
+    /// Raw observation-space descriptor from the component.
+    observation_spec: Tensor,
+    /// Raw action-space descriptor from the component.
+    action_spec: Tensor,
     /// Whether the environment has been initialized.
     initialized: bool,
     /// Whether the last episode is done.
@@ -74,16 +78,23 @@ impl PyWasmEnv {
             .init(handle, env_config.clone())
             .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
 
-        let (_, observation_space) =
-            make_box_space(vec![1], f32::NEG_INFINITY as f64, f32::INFINITY as f64);
-        let (_, action_space) = make_discrete_space(2);
+        let observation_spec = runtime
+            .observation_space(handle)
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        let action_spec = runtime
+            .action_space(handle)
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        let observation_space = make_tensor_box_space(py, &observation_spec)?;
+        let (action_space, _) = make_tensor_action_space(py, &action_spec)?;
 
         Ok(Self {
             runtime,
             handle: Some(handle),
             config: env_config,
-            observation_space: Py::new(py, observation_space)?,
-            action_space: Py::new(py, action_space)?,
+            observation_space,
+            action_space,
+            observation_spec,
+            action_spec,
             initialized: false,
             done: true,
             total_reward: 0.0,
@@ -182,10 +193,10 @@ impl PyWasmEnv {
         let dict = PyDict::new(py);
         if let Some(handle) = self.handle {
             dict.set_item("env_id", handle.id)?;
-            dict.set_item("obs_shape", vec![1usize])?;
-            dict.set_item("act_shape", vec![1usize])?;
-            dict.set_item("obs_dtype", "Float32")?;
-            dict.set_item("act_dtype", "Int32")?;
+            dict.set_item("obs_shape", self.observation_spec.shape.clone())?;
+            dict.set_item("act_shape", self.action_spec.shape.clone())?;
+            dict.set_item("obs_dtype", self.observation_spec.dtype.to_string())?;
+            dict.set_item("act_dtype", self.action_spec.dtype.to_string())?;
             dict.set_item("max_episode_steps", py.None())?;
         }
         Ok(dict)
@@ -220,7 +231,7 @@ impl PyWasmEnv {
     }
 
     /// Take a snapshot of the current state.
-    pub fn snapshot(&self) -> PyResult<Vec<u8>> {
+    pub fn snapshot(&mut self) -> PyResult<Vec<u8>> {
         let handle = self.handle()?;
         let snapshot = self
             .runtime

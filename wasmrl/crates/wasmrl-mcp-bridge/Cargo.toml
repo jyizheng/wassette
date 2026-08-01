@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 description = "MCP bridge for WasmRL environments - exposes RL envs as MCP tools"
 
+[features]
+integration = []
+
 [dependencies]
 wasmrl-wit = { workspace = true }
 wasmrl-runtime = { workspace = true }

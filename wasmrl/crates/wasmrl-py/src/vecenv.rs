@@ -15,11 +15,11 @@ use wasmrl_wit::{EnvConfig, SnapshotData, Tensor};
 
 use crate::config::PyEnvConfig;
 use crate::error::PyWasmRLError;
-use crate::spaces::{make_box_space, make_discrete_space, PySpace};
+use crate::spaces::{make_tensor_action_space, make_tensor_box_space};
 use crate::tensor::{numpy_batch_to_action_tensors, stack_observations};
 
 /// Vectorized WasmRL environment for parallel training.
-#[pyclass(name = "WasmVecEnv")]
+#[pyclass(name = "WasmVecEnv", unsendable)]
 pub struct PyWasmVecEnv {
     /// Runtime used for batch execution.
     runtime: EnvRuntime,
@@ -34,10 +34,12 @@ pub struct PyWasmVecEnv {
     num_envs: usize,
     /// Observation space (single env).
     #[pyo3(get)]
-    single_observation_space: Py<PySpace>,
+    single_observation_space: Py<PyAny>,
     /// Action space (single env).
     #[pyo3(get)]
-    single_action_space: Py<PySpace>,
+    single_action_space: Py<PyAny>,
+    /// Number of actions for a discrete action space.
+    discrete_action_count: Option<u64>,
     /// Whether auto-reset is enabled.
     #[pyo3(get)]
     auto_reset: bool,
@@ -97,9 +99,15 @@ impl PyWasmVecEnv {
                 .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
         }
 
-        let (_, observation_space) =
-            make_box_space(vec![1], f32::NEG_INFINITY as f64, f32::INFINITY as f64);
-        let (_, action_space) = make_discrete_space(2);
+        let first_handle = handles[0];
+        let observation_spec = runtime
+            .observation_space(first_handle)
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        let action_spec = runtime
+            .action_space(first_handle)
+            .map_err(|e| PyWasmRLError::RuntimeError(e.to_string()))?;
+        let observation_space = make_tensor_box_space(py, &observation_spec)?;
+        let (action_space, discrete_action_count) = make_tensor_action_space(py, &action_spec)?;
 
         Ok(Self {
             runtime,
@@ -107,8 +115,9 @@ impl PyWasmVecEnv {
             config: env_config,
             seed: py_config.seed,
             num_envs,
-            single_observation_space: Py::new(py, observation_space)?,
-            single_action_space: Py::new(py, action_space)?,
+            single_observation_space: observation_space,
+            single_action_space: action_space,
+            discrete_action_count: discrete_action_count.map(|count| count as u64),
             auto_reset: py_config.auto_reset,
             initialized: false,
             dones: vec![true; num_envs],
@@ -285,6 +294,11 @@ impl PyWasmVecEnv {
 
     /// Sample random discrete actions for all environments.
     pub fn sample_actions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i32>>> {
+        let action_count = self.discrete_action_count.ok_or_else(|| {
+            pyo3::exceptions::PyNotImplementedError::new_err(
+                "sample_actions currently supports discrete action spaces only",
+            )
+        })?;
         let mut rng_state = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -292,7 +306,7 @@ impl PyWasmVecEnv {
         let actions: Vec<i32> = (0..self.num_envs)
             .map(|_| {
                 rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                (rng_state % 2) as i32
+                (rng_state % action_count) as i32
             })
             .collect();
 
@@ -300,7 +314,7 @@ impl PyWasmVecEnv {
     }
 
     /// Take snapshots of all environments.
-    pub fn snapshot_all(&self) -> PyResult<Vec<Vec<u8>>> {
+    pub fn snapshot_all(&mut self) -> PyResult<Vec<Vec<u8>>> {
         self.handles
             .iter()
             .map(|handle| {

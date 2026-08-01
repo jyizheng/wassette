@@ -5,16 +5,21 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::{debug, info, instrument, warn};
+use wasmrl_policy::Policy;
+use wasmrl_runtime::{
+    ComponentRef, EnvRuntime, InstanceHandle, PolicyConfig, RuntimeConfig, WasmEnvFactory,
+};
+use wasmrl_wit::{DType, EnvConfig, Tensor};
 
 use crate::config::{McpBridgeConfig, SessionConfig};
 use crate::error::{BridgeError, BridgeResult};
 use crate::overhead::{OverheadMetrics, TimingBreakdown};
-use crate::session::{SessionId, SessionManager, SessionState};
+use crate::session::{SessionId, SessionManager};
 
 /// Result of a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,7 +110,6 @@ impl McpTool {
 }
 
 /// The main MCP bridge for WasmRL environments.
-#[derive(Debug)]
 pub struct EnvMcpBridge {
     /// Bridge configuration.
     config: McpBridgeConfig,
@@ -118,6 +122,33 @@ pub struct EnvMcpBridge {
 
     /// Tool definitions.
     tools: Vec<McpTool>,
+
+    /// Lazily loaded component runtime.
+    runtime: Option<EnvRuntime>,
+
+    /// Runtime handles keyed by MCP session ID.
+    handles: HashMap<SessionId, InstanceHandle>,
+
+    /// Cached observation-space descriptor from the component.
+    observation_space: Option<Tensor>,
+
+    /// Cached action-space descriptor from the component.
+    action_space: Option<Tensor>,
+}
+
+impl std::fmt::Debug for EnvMcpBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvMcpBridge")
+            .field("config", &self.config)
+            .field("sessions", &self.sessions)
+            .field("metrics", &self.metrics)
+            .field("tools", &self.tools)
+            .field("runtime_loaded", &self.runtime.is_some())
+            .field("handles", &self.handles)
+            .field("observation_space", &self.observation_space)
+            .field("action_space", &self.action_space)
+            .finish()
+    }
 }
 
 impl EnvMcpBridge {
@@ -131,7 +162,74 @@ impl EnvMcpBridge {
             metrics: OverheadMetrics::new(),
             config,
             tools,
+            runtime: None,
+            handles: HashMap::new(),
+            observation_space: None,
+            action_space: None,
         })
+    }
+
+    fn load_policy(&self) -> BridgeResult<PolicyConfig> {
+        let Some(path) = self.config.policy_path.as_deref() else {
+            return Ok(PolicyConfig::default());
+        };
+
+        let policy = Policy::from_file(std::path::Path::new(path))
+            .map_err(|error| BridgeError::policy_violation(error.to_string()))?;
+        policy
+            .validate()
+            .map_err(|error| BridgeError::policy_violation(error.to_string()))?;
+
+        Ok(PolicyConfig {
+            max_memory_mb: policy.memory.enabled.then_some(policy.memory.max_mb as u64),
+            fuel_per_step: policy.fuel.enabled.then_some(policy.fuel.per_step),
+            fuel_per_reset: policy.fuel.enabled.then_some(policy.fuel.per_reset),
+            fuel_per_batch: policy.fuel.enabled.then_some(policy.fuel.per_batch),
+            timeout_ms_step: policy.timeout.enabled.then_some(policy.timeout.step_ms),
+            timeout_ms_reset: policy.timeout.enabled.then_some(policy.timeout.reset_ms),
+            fs_read_paths: policy
+                .wasi
+                .filesystem_read
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            fs_write_paths: policy
+                .wasi
+                .filesystem_write
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            network_enabled: policy.wasi.network,
+        })
+    }
+
+    fn ensure_runtime(&mut self) -> BridgeResult<()> {
+        if self.runtime.is_some() {
+            return Ok(());
+        }
+        if self.config.component_path.is_empty() {
+            return Err(BridgeError::component_load("component path is empty"));
+        }
+
+        let policy = self.load_policy()?;
+        let runtime_config = RuntimeConfig::new()
+            .with_max_instances(self.config.max_sessions)
+            .with_step_timeout(std::time::Duration::from_millis(self.config.timeout_ms))
+            .with_reset_timeout(std::time::Duration::from_millis(self.config.timeout_ms));
+        let factory = WasmEnvFactory::with_config(
+            ComponentRef::from_file(&self.config.component_path),
+            policy,
+            runtime_config,
+        )
+        .map_err(|error| BridgeError::component_load(error.to_string()))?;
+        self.runtime = Some(EnvRuntime::new(Arc::new(factory)));
+        Ok(())
+    }
+
+    fn runtime_mut(&mut self) -> BridgeResult<&mut EnvRuntime> {
+        self.runtime
+            .as_mut()
+            .ok_or_else(|| BridgeError::runtime("component runtime is not loaded"))
     }
 
     /// Create tool definitions for an environment.
@@ -334,7 +432,61 @@ impl EnvMcpBridge {
             config = config.with_env_config(c);
         }
 
-        let session_id = self.sessions.create_session(config)?;
+        self.ensure_runtime()?;
+        let env_config = config
+            .env_config
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?
+            .unwrap_or_else(|| "{}".to_string());
+
+        let handle = self
+            .runtime
+            .as_ref()
+            .expect("runtime was loaded above")
+            .factory()
+            .spawn_one()
+            .map_err(|error| BridgeError::runtime(error.to_string()))?;
+
+        let init_result = self.runtime_mut()?.init(handle, EnvConfig::new(env_config));
+        if let Err(error) = init_result {
+            let _ = self
+                .runtime
+                .as_ref()
+                .expect("runtime was loaded above")
+                .factory()
+                .release(handle);
+            return Err(BridgeError::environment(error.to_string()));
+        }
+
+        let observation_space = match self.runtime_mut()?.observation_space(handle) {
+            Ok(space) => space,
+            Err(error) => {
+                let _ = self.runtime_mut()?.close(handle);
+                return Err(BridgeError::environment(error.to_string()));
+            }
+        };
+        let action_space = match self.runtime_mut()?.action_space(handle) {
+            Ok(space) => space,
+            Err(error) => {
+                let _ = self.runtime_mut()?.close(handle);
+                return Err(BridgeError::environment(error.to_string()));
+            }
+        };
+
+        let session_id = match self.sessions.create_session(config) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                let _ = self.runtime_mut()?.close(handle);
+                return Err(error);
+            }
+        };
+        self.sessions
+            .get_mut(&session_id)?
+            .set_instance_handle(handle.id);
+        self.handles.insert(session_id.clone(), handle);
+        self.observation_space = Some(observation_space);
+        self.action_space = Some(action_space);
         info!(session_id = %session_id, "Created new session");
 
         Ok(json!({
@@ -351,20 +503,30 @@ impl EnvMcpBridge {
             .ok_or_else(|| BridgeError::invalid_action("session_id is required"))?;
         let session_id = SessionId::from_string(session_id);
 
-        let seed = args.get("seed").and_then(|v| v.as_u64()).unwrap_or(0);
-
-        // Get session and verify it can be reset
-        let session = self.sessions.get_mut(&session_id)?;
-        if !session.state.can_reset() {
-            return Err(BridgeError::environment(format!(
-                "Session cannot be reset in state {:?}",
-                session.state
-            )));
-        }
-
-        // Simulate reset (in real impl, this would call the runtime)
-        let observation = Self::simulate_reset(seed);
-        session.mark_reset(observation.clone());
+        let seed = {
+            let session = self.sessions.get(&session_id)?;
+            if !session.state.can_reset() {
+                return Err(BridgeError::environment(format!(
+                    "Session cannot be reset in state {:?}",
+                    session.state
+                )));
+            }
+            args.get("seed")
+                .and_then(|value| value.as_u64())
+                .or(session.config.seed)
+                .unwrap_or(0)
+        };
+        let handle = self.handle_for_session(&session_id)?;
+        let observation = match self.runtime_mut()?.reset(handle, seed) {
+            Ok(observation) => Self::tensor_to_json(&observation)?,
+            Err(error) => {
+                self.sessions.get_mut(&session_id)?.mark_error();
+                return Err(BridgeError::environment(error.to_string()));
+            }
+        };
+        self.sessions
+            .get_mut(&session_id)?
+            .mark_reset(observation.clone());
 
         debug!(session_id = %session_id, seed = %seed, "Session reset");
 
@@ -383,27 +545,78 @@ impl EnvMcpBridge {
             .ok_or_else(|| BridgeError::invalid_action("session_id is required"))?;
         let session_id = SessionId::from_string(session_id);
 
-        let action = args
+        let action_json = args
             .get("action")
             .ok_or_else(|| BridgeError::invalid_action("action is required"))?
             .clone();
 
-        // Get session and verify it can step
-        let session = self.sessions.get_mut(&session_id)?;
-        if !session.state.can_step() {
-            return Err(BridgeError::environment(format!(
-                "Session cannot step in state {:?}",
-                session.state
-            )));
-        }
+        let (auto_reset, reset_seed, max_steps, episode_steps) = {
+            let session = self.sessions.get(&session_id)?;
+            if !session.state.can_step() {
+                return Err(BridgeError::environment(format!(
+                    "Session cannot step in state {:?}",
+                    session.state
+                )));
+            }
+            (
+                session.config.auto_reset,
+                session.config.seed.unwrap_or(0),
+                session.config.max_steps,
+                session.episode_steps,
+            )
+        };
 
-        // Simulate step (in real impl, this would call the runtime)
-        let (observation, reward, terminated, truncated) = Self::simulate_step(&action);
-        session.mark_step(observation.clone(), reward, terminated || truncated);
+        let handle = self.handle_for_session(&session_id)?;
+        let action_space = self
+            .action_space
+            .clone()
+            .ok_or_else(|| BridgeError::runtime("action space is unavailable"))?;
+        let action = Self::json_to_action_tensor(&action_json, &action_space)?;
+        let result = match self.runtime_mut()?.step(handle, &action) {
+            Ok(result) => result,
+            Err(error) => {
+                self.sessions.get_mut(&session_id)?.mark_error();
+                return Err(BridgeError::environment(error.to_string()));
+            }
+        };
+
+        let final_observation = Self::tensor_to_json(&result.observation)?;
+        let forced_truncation = max_steps.is_some_and(|limit| episode_steps + 1 >= limit);
+        let terminated = result.terminated;
+        let truncated = result.truncated || forced_truncation;
+        let done = terminated || truncated;
+        let guest_info = result
+            .info
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            .unwrap_or(Value::Null);
+
+        let (completed_steps, completed_reward) = {
+            let session = self.sessions.get_mut(&session_id)?;
+            session.mark_step(final_observation.clone(), result.reward, done);
+            (session.episode_steps, session.episode_reward)
+        };
+
+        let (observation, auto_reset_observation) = if done && auto_reset {
+            let reset_observation = match self.runtime_mut()?.reset(handle, reset_seed) {
+                Ok(observation) => Self::tensor_to_json(&observation)?,
+                Err(error) => {
+                    self.sessions.get_mut(&session_id)?.mark_error();
+                    return Err(BridgeError::environment(error.to_string()));
+                }
+            };
+            self.sessions
+                .get_mut(&session_id)?
+                .mark_reset(reset_observation.clone());
+            (reset_observation, Some(final_observation.clone()))
+        } else {
+            (final_observation, None)
+        };
 
         debug!(
             session_id = %session_id,
-            reward = %reward,
+            reward = %result.reward,
             terminated = %terminated,
             "Session stepped"
         );
@@ -411,12 +624,14 @@ impl EnvMcpBridge {
         Ok(json!({
             "session_id": session_id.as_str(),
             "observation": observation,
-            "reward": reward,
+            "reward": result.reward,
             "terminated": terminated,
             "truncated": truncated,
             "info": {
-                "episode_steps": session.episode_steps,
-                "episode_reward": session.episode_reward
+                "episode_steps": completed_steps,
+                "episode_reward": completed_reward,
+                "guest": guest_info,
+                "final_observation": auto_reset_observation
             }
         }))
     }
@@ -429,6 +644,12 @@ impl EnvMcpBridge {
             .ok_or_else(|| BridgeError::invalid_action("session_id is required"))?;
         let session_id = SessionId::from_string(session_id);
 
+        self.sessions.get(&session_id)?;
+        if let Some(handle) = self.handles.remove(&session_id) {
+            self.runtime_mut()?
+                .close(handle)
+                .map_err(|error| BridgeError::environment(error.to_string()))?;
+        }
         self.sessions.close_session(&session_id)?;
         info!(session_id = %session_id, "Session closed");
 
@@ -445,20 +666,13 @@ impl EnvMcpBridge {
             let session = self.sessions.get(&session_id)?;
             Ok(session.info())
         } else {
-            // Return environment info
             Ok(json!({
                 "env_name": self.config.get_env_name(),
                 "component_path": self.config.component_path,
                 "max_sessions": self.config.max_sessions,
-                "observation_space": {
-                    "type": "box",
-                    "shape": [4],
-                    "dtype": "float32"
-                },
-                "action_space": {
-                    "type": "discrete",
-                    "n": 2
-                }
+                "component_loaded": self.runtime.is_some(),
+                "observation_space": self.observation_space.as_ref().map(Self::space_to_json),
+                "action_space": self.action_space.as_ref().map(Self::space_to_json)
             }))
         }
     }
@@ -485,20 +699,195 @@ impl EnvMcpBridge {
         Ok(serde_json::to_value(summary)?)
     }
 
-    /// Simulate a reset (placeholder for actual runtime call).
-    fn simulate_reset(seed: u64) -> Value {
-        // In real implementation, this would call wasmrl-runtime
-        json!([seed as f64 % 1.0, 0.0, 0.0, 0.0])
+    fn handle_for_session(&self, session_id: &SessionId) -> BridgeResult<InstanceHandle> {
+        self.handles.get(session_id).copied().ok_or_else(|| {
+            BridgeError::runtime(format!("session {} has no runtime instance", session_id))
+        })
     }
 
-    /// Simulate a step (placeholder for actual runtime call).
-    fn simulate_step(_action: &Value) -> (Value, f64, bool, bool) {
-        // In real implementation, this would call wasmrl-runtime
-        let observation = json!([0.1, 0.2, 0.3, 0.4]);
-        let reward = 1.0;
-        let terminated = false;
-        let truncated = false;
-        (observation, reward, terminated, truncated)
+    fn space_to_json(space: &Tensor) -> Value {
+        let discrete_count = Self::discrete_action_count(space);
+        json!({
+            "type": if discrete_count.is_some() { "discrete" } else { "box" },
+            "shape": space.shape,
+            "dtype": space.dtype.to_string(),
+            "n": discrete_count,
+        })
+    }
+
+    fn discrete_action_count(space: &Tensor) -> Option<i64> {
+        if space.shape.as_slice() != [1] {
+            return None;
+        }
+        let count = match space.dtype {
+            DType::Int32 if space.data.len() == 4 => {
+                i32::from_le_bytes(space.data.as_slice().try_into().ok()?) as i64
+            }
+            DType::Int64 if space.data.len() == 8 => {
+                i64::from_le_bytes(space.data.as_slice().try_into().ok()?)
+            }
+            DType::Uint8 if space.data.len() == 1 => space.data[0] as i64,
+            _ => return None,
+        };
+        (count > 0).then_some(count)
+    }
+
+    fn json_to_action_tensor(action: &Value, space: &Tensor) -> BridgeResult<Tensor> {
+        if action.is_object() {
+            if let Ok(tensor) = serde_json::from_value::<Tensor>(action.clone()) {
+                if !tensor.is_valid() {
+                    return Err(BridgeError::invalid_action("tensor byte length is invalid"));
+                }
+                return Ok(tensor);
+            }
+        }
+
+        let values: Vec<&Value> = match action {
+            Value::Array(values) => values.iter().collect(),
+            value => vec![value],
+        };
+        let expected: usize = space.shape.iter().map(|&dim| dim as usize).product();
+        if values.len() != expected {
+            return Err(BridgeError::invalid_action(format!(
+                "expected {} values for shape {:?}, got {}",
+                expected,
+                space.shape,
+                values.len()
+            )));
+        }
+
+        if let Some(count) = Self::discrete_action_count(space) {
+            let value = values[0]
+                .as_i64()
+                .ok_or_else(|| BridgeError::invalid_action("discrete action must be an integer"))?;
+            if !(0..count).contains(&value) {
+                return Err(BridgeError::invalid_action(format!(
+                    "discrete action must be in range 0..{}",
+                    count
+                )));
+            }
+        }
+
+        let mut data = Vec::with_capacity(expected * space.dtype.element_size());
+        for value in values {
+            match space.dtype {
+                DType::Float32 => data.extend_from_slice(
+                    &(value.as_f64().ok_or_else(|| {
+                        BridgeError::invalid_action("float32 action must contain numbers")
+                    })? as f32)
+                        .to_le_bytes(),
+                ),
+                DType::Float64 => data.extend_from_slice(
+                    &value
+                        .as_f64()
+                        .ok_or_else(|| {
+                            BridgeError::invalid_action("float64 action must contain numbers")
+                        })?
+                        .to_le_bytes(),
+                ),
+                DType::Int32 => {
+                    let number = value.as_i64().ok_or_else(|| {
+                        BridgeError::invalid_action("int32 action must contain integers")
+                    })?;
+                    let number = i32::try_from(number)
+                        .map_err(|_| BridgeError::invalid_action("int32 action is out of range"))?;
+                    data.extend_from_slice(&number.to_le_bytes());
+                }
+                DType::Int64 => data.extend_from_slice(
+                    &value
+                        .as_i64()
+                        .ok_or_else(|| {
+                            BridgeError::invalid_action("int64 action must contain integers")
+                        })?
+                        .to_le_bytes(),
+                ),
+                DType::Uint8 => {
+                    let number = value.as_u64().ok_or_else(|| {
+                        BridgeError::invalid_action("uint8 action must contain unsigned integers")
+                    })?;
+                    data.push(u8::try_from(number).map_err(|_| {
+                        BridgeError::invalid_action("uint8 action is out of range")
+                    })?);
+                }
+                DType::Boolean => data.push(
+                    value
+                        .as_bool()
+                        .ok_or_else(|| {
+                            BridgeError::invalid_action("boolean action must contain booleans")
+                        })?
+                        .into(),
+                ),
+            }
+        }
+
+        Ok(Tensor::new(space.dtype, space.shape.clone(), data))
+    }
+
+    fn tensor_to_json(tensor: &Tensor) -> BridgeResult<Value> {
+        if !tensor.is_valid() {
+            return Err(BridgeError::serialization(format!(
+                "invalid tensor byte length for {:?} with shape {:?}",
+                tensor.dtype, tensor.shape
+            )));
+        }
+
+        let values = match tensor.dtype {
+            DType::Float32 => tensor
+                .data
+                .chunks_exact(4)
+                .map(|bytes| {
+                    let number = f32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
+                    serde_json::Number::from_f64(number as f64)
+                        .map(Value::Number)
+                        .ok_or_else(|| BridgeError::serialization("non-finite float32 value"))
+                })
+                .collect::<BridgeResult<Vec<_>>>()?,
+            DType::Float64 => tensor
+                .data
+                .chunks_exact(8)
+                .map(|bytes| {
+                    let number = f64::from_le_bytes(bytes.try_into().expect("eight-byte chunk"));
+                    serde_json::Number::from_f64(number)
+                        .map(Value::Number)
+                        .ok_or_else(|| BridgeError::serialization("non-finite float64 value"))
+                })
+                .collect::<BridgeResult<Vec<_>>>()?,
+            DType::Int32 => tensor
+                .data
+                .chunks_exact(4)
+                .map(|bytes| {
+                    Value::from(i32::from_le_bytes(
+                        bytes.try_into().expect("four-byte chunk"),
+                    ))
+                })
+                .collect(),
+            DType::Int64 => tensor
+                .data
+                .chunks_exact(8)
+                .map(|bytes| {
+                    Value::from(i64::from_le_bytes(
+                        bytes.try_into().expect("eight-byte chunk"),
+                    ))
+                })
+                .collect(),
+            DType::Uint8 => tensor.data.iter().copied().map(Value::from).collect(),
+            DType::Boolean => tensor
+                .data
+                .iter()
+                .map(|value| Value::Bool(*value != 0))
+                .collect(),
+        };
+        Ok(Value::Array(values))
+    }
+}
+
+impl Drop for EnvMcpBridge {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            for (_, handle) in self.handles.drain() {
+                let _ = runtime.close(handle);
+            }
+        }
     }
 }
 
@@ -532,6 +921,14 @@ impl SharedEnvMcpBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "integration")]
+    fn counter_config() -> McpBridgeConfig {
+        let component_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/wasm32-wasip2/release/counter_env.wasm");
+        assert!(component_path.is_file());
+        McpBridgeConfig::new(component_path.to_string_lossy()).with_env_name("env")
+    }
 
     #[test]
     fn test_tool_result_success() {
@@ -581,8 +978,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "integration")]
     fn test_bridge_create_session() {
-        let config = McpBridgeConfig::new("env.wasm");
+        let config = counter_config();
         let mut bridge = EnvMcpBridge::new(config).unwrap();
 
         let result = bridge.call_tool("env_create", json!({"seed": 42}));
@@ -591,8 +989,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "integration")]
     fn test_bridge_session_workflow() {
-        let config = McpBridgeConfig::new("env.wasm");
+        let config = counter_config();
         let mut bridge = EnvMcpBridge::new(config).unwrap();
 
         // Create session
@@ -668,8 +1067,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "integration")]
     fn test_bridge_list_sessions() {
-        let config = McpBridgeConfig::new("env.wasm");
+        let config = counter_config();
         let mut bridge = EnvMcpBridge::new(config).unwrap();
 
         // Create some sessions
@@ -683,8 +1083,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "integration")]
     fn test_shared_bridge() {
-        let config = McpBridgeConfig::new("env.wasm");
+        let config = counter_config();
         let bridge = SharedEnvMcpBridge::new(config).unwrap();
 
         let tools = bridge.get_tools();

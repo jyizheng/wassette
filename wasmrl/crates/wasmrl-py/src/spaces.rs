@@ -5,6 +5,7 @@
 
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
+use wasmrl_wit::{DType, Tensor};
 
 /// Base trait for spaces (not directly exposed to Python).
 pub trait Space {
@@ -257,6 +258,47 @@ pub fn make_discrete_space(n: i64) -> (PyDiscrete, PySpace) {
     PyDiscrete::new(n, 0)
 }
 
+/// Create a Python Box space from a component tensor-space descriptor.
+pub fn make_tensor_box_space(py: Python<'_>, tensor: &Tensor) -> PyResult<Py<PyAny>> {
+    let shape = tensor.shape.iter().map(|&dim| dim as usize).collect();
+    let (box_space, mut base) = PyBox::uniform(f64::NEG_INFINITY, f64::INFINITY, shape, "");
+    base.dtype = tensor.dtype.to_string();
+    Ok(Py::new(py, (box_space, base))?.into_any())
+}
+
+/// Decode a discrete action count from a component tensor-space descriptor.
+pub fn discrete_action_count(tensor: &Tensor) -> Option<i64> {
+    if tensor.shape.as_slice() != [1] {
+        return None;
+    }
+
+    let count = match tensor.dtype {
+        DType::Int32 if tensor.data.len() == 4 => {
+            i32::from_le_bytes(tensor.data.as_slice().try_into().ok()?) as i64
+        }
+        DType::Int64 if tensor.data.len() == 8 => {
+            i64::from_le_bytes(tensor.data.as_slice().try_into().ok()?)
+        }
+        DType::Uint8 if tensor.data.len() == 1 => tensor.data[0] as i64,
+        _ => return None,
+    };
+
+    (count > 0).then_some(count)
+}
+
+/// Create a Python action space from a component tensor-space descriptor.
+pub fn make_tensor_action_space(
+    py: Python<'_>,
+    tensor: &Tensor,
+) -> PyResult<(Py<PyAny>, Option<i64>)> {
+    if let Some(count) = discrete_action_count(tensor) {
+        let (discrete, base) = make_discrete_space(count);
+        return Ok((Py::new(py, (discrete, base))?.into_any(), Some(count)));
+    }
+
+    Ok((make_tensor_box_space(py, tensor)?, None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +399,11 @@ mod tests {
     fn test_discrete_repr() {
         let (disc, _) = PyDiscrete::new(5, 0);
         assert_eq!(disc.__repr__(), "Discrete(5)");
+    }
+
+    #[test]
+    fn test_discrete_action_count_from_tensor() {
+        let tensor = Tensor::new(DType::Int32, vec![1], 3_i32.to_le_bytes().to_vec());
+        assert_eq!(discrete_action_count(&tensor), Some(3));
     }
 }

@@ -16,6 +16,14 @@ use wasmrl_mcp_bridge::{
     SessionManager, SessionState, TimingBreakdown, ToolResult,
 };
 
+#[cfg(feature = "integration")]
+fn counter_bridge_config() -> McpBridgeConfig {
+    let component_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/wasm32-wasip2/release/counter_env.wasm");
+    assert!(component_path.is_file());
+    McpBridgeConfig::new(component_path.to_string_lossy()).with_env_name("env")
+}
+
 // =============================================================================
 // Configuration Tests
 // =============================================================================
@@ -152,8 +160,9 @@ fn test_bridge_tool_definitions() {
 }
 
 #[test]
+#[cfg(feature = "integration")]
 fn test_bridge_create_and_reset() {
-    let config = McpBridgeConfig::new("env.wasm");
+    let config = counter_bridge_config();
     let mut bridge = EnvMcpBridge::new(config).unwrap();
 
     // Create session
@@ -177,8 +186,9 @@ fn test_bridge_create_and_reset() {
 }
 
 #[test]
+#[cfg(feature = "integration")]
 fn test_bridge_step_workflow() {
-    let config = McpBridgeConfig::new("env.wasm");
+    let config = counter_bridge_config();
     let mut bridge = EnvMcpBridge::new(config).unwrap();
 
     // Create and reset
@@ -231,8 +241,9 @@ fn test_bridge_unknown_tool() {
 }
 
 #[test]
+#[cfg(feature = "integration")]
 fn test_bridge_list_sessions() {
-    let config = McpBridgeConfig::new("env.wasm");
+    let config = counter_bridge_config();
     let mut bridge = EnvMcpBridge::new(config).unwrap();
 
     // Create several sessions
@@ -303,8 +314,9 @@ fn test_overhead_summary_report() {
 }
 
 #[test]
+#[cfg(feature = "integration")]
 fn test_bridge_metrics_collection() {
-    let config = McpBridgeConfig::new("env.wasm").with_metrics(true);
+    let config = counter_bridge_config().with_metrics(true);
     let mut bridge = EnvMcpBridge::new(config).unwrap();
 
     // Perform operations

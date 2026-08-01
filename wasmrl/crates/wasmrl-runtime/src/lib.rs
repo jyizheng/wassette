@@ -78,6 +78,7 @@
 
 #![warn(missing_docs)]
 
+mod bindings;
 mod config;
 mod engine;
 mod error;

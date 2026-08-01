@@ -24,6 +24,10 @@
 use serde::{Deserialize, Serialize};
 use wasmrl_sdk_rust::{DeterministicRng, SnapshotHelper, TensorEncoder};
 
+#[cfg(target_arch = "wasm32")]
+#[allow(warnings)]
+mod bindings;
+
 /// Configuration for the counter environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CounterConfig {
@@ -235,6 +239,207 @@ impl StepOutput {
     pub fn done(&self) -> bool {
         self.terminated || self.truncated
     }
+}
+
+/// WebAssembly component implementation of the WasmRL environment world.
+#[cfg(target_arch = "wasm32")]
+mod component {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    use bindings::exports::wasmrl::env::{batch, environment, snapshot};
+
+    use super::{bindings, CounterEnv};
+
+    struct Component;
+
+    #[derive(Default)]
+    struct ComponentEnvironments {
+        next_id: u64,
+        environments: HashMap<u64, CounterEnv>,
+    }
+
+    static COMPONENT_ENVIRONMENTS: OnceLock<Mutex<ComponentEnvironments>> = OnceLock::new();
+
+    fn component_environments() -> &'static Mutex<ComponentEnvironments> {
+        COMPONENT_ENVIRONMENTS.get_or_init(|| {
+            Mutex::new(ComponentEnvironments {
+                next_id: 1,
+                environments: HashMap::new(),
+            })
+        })
+    }
+
+    fn with_component_env<T>(
+        handle: environment::EnvHandle,
+        operation: impl FnOnce(&mut CounterEnv) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut registry = component_environments()
+            .lock()
+            .map_err(|_| "environment registry lock poisoned".to_string())?;
+        let env = registry
+            .environments
+            .get_mut(&handle.id)
+            .ok_or_else(|| format!("environment handle {} not found", handle.id))?;
+        operation(env)
+    }
+
+    fn observation_tensor(data: Vec<u8>) -> environment::Tensor {
+        environment::Tensor {
+            dtype: environment::Dtype::Float32,
+            shape: vec![1],
+            data,
+        }
+    }
+
+    fn action_space_tensor(data: Vec<u8>) -> environment::Tensor {
+        environment::Tensor {
+            dtype: environment::Dtype::Int32,
+            shape: vec![1],
+            data,
+        }
+    }
+
+    impl environment::Guest for Component {
+        fn init(config: environment::EnvConfig) -> Result<environment::EnvHandle, String> {
+            let mut env = CounterEnv::new();
+            env.init(&config.config_json)?;
+
+            let mut registry = component_environments()
+                .lock()
+                .map_err(|_| "environment registry lock poisoned".to_string())?;
+            let id = registry.next_id;
+            registry.next_id = registry.next_id.wrapping_add(1).max(1);
+            registry.environments.insert(id, env);
+            Ok(environment::EnvHandle { id })
+        }
+
+        fn reset(handle: environment::EnvHandle, seed: u64) -> Result<environment::Tensor, String> {
+            with_component_env(handle, |env| env.reset(seed).map(observation_tensor))
+        }
+
+        fn step(
+            handle: environment::EnvHandle,
+            action: environment::Tensor,
+        ) -> Result<environment::StepResult, String> {
+            if action.dtype != environment::Dtype::Int32
+                || action.shape.as_slice() != [1]
+                || action.data.len() != std::mem::size_of::<i32>()
+            {
+                return Err("counter action must be an int32 tensor with shape [1]".to_string());
+            }
+
+            with_component_env(handle, |env| {
+                let result = env.step(&action.data)?;
+                Ok(environment::StepResult {
+                    observation: observation_tensor(result.observation),
+                    reward: result.reward,
+                    terminated: result.terminated,
+                    truncated: result.truncated,
+                    info: result.info,
+                })
+            })
+        }
+
+        fn observation_space(
+            handle: environment::EnvHandle,
+        ) -> Result<environment::Tensor, String> {
+            with_component_env(handle, |env| {
+                Ok(observation_tensor(env.observation_space()))
+            })
+        }
+
+        fn action_space(handle: environment::EnvHandle) -> Result<environment::Tensor, String> {
+            with_component_env(handle, |env| Ok(action_space_tensor(env.action_space())))
+        }
+
+        fn close(handle: environment::EnvHandle) -> Result<(), String> {
+            let mut registry = component_environments()
+                .lock()
+                .map_err(|_| "environment registry lock poisoned".to_string())?;
+            let mut env = registry
+                .environments
+                .remove(&handle.id)
+                .ok_or_else(|| format!("environment handle {} not found", handle.id))?;
+            env.close()
+        }
+    }
+
+    impl batch::Guest for Component {
+        fn reset_batch(
+            handles: Vec<environment::EnvHandle>,
+            seeds: Vec<u64>,
+        ) -> Result<Vec<environment::Tensor>, String> {
+            if handles.len() != seeds.len() {
+                return Err(format!(
+                    "batch size mismatch: {} handles, {} seeds",
+                    handles.len(),
+                    seeds.len()
+                ));
+            }
+
+            handles
+                .into_iter()
+                .zip(seeds)
+                .map(|(handle, seed)| <Self as environment::Guest>::reset(handle, seed))
+                .collect()
+        }
+
+        fn step_batch(
+            handles: Vec<environment::EnvHandle>,
+            actions: Vec<environment::Tensor>,
+        ) -> Result<batch::BatchStepResult, String> {
+            if handles.len() != actions.len() {
+                return Err(format!(
+                    "batch size mismatch: {} handles, {} actions",
+                    handles.len(),
+                    actions.len()
+                ));
+            }
+
+            let mut result = batch::BatchStepResult {
+                observations: Vec::with_capacity(handles.len()),
+                rewards: Vec::with_capacity(handles.len()),
+                terminated: Vec::with_capacity(handles.len()),
+                truncated: Vec::with_capacity(handles.len()),
+                infos: Vec::with_capacity(handles.len()),
+            };
+
+            for (handle, action) in handles.into_iter().zip(actions) {
+                let step = <Self as environment::Guest>::step(handle, action)?;
+                result.observations.push(step.observation);
+                result.rewards.push(step.reward);
+                result.terminated.push(step.terminated);
+                result.truncated.push(step.truncated);
+                result.infos.push(step.info);
+            }
+
+            Ok(result)
+        }
+    }
+
+    impl snapshot::Guest for Component {
+        fn snapshot(handle: environment::EnvHandle) -> Result<snapshot::SnapshotData, String> {
+            with_component_env(handle, |env| {
+                Ok(snapshot::SnapshotData {
+                    version: 1,
+                    data: env.snapshot()?,
+                })
+            })
+        }
+
+        fn restore(
+            handle: environment::EnvHandle,
+            state: snapshot::SnapshotData,
+        ) -> Result<(), String> {
+            if state.version != 1 {
+                return Err(format!("unsupported snapshot version {}", state.version));
+            }
+            with_component_env(handle, |env| env.restore(&state.data))
+        }
+    }
+
+    bindings::export!(Component with_types_in bindings);
 }
 
 // ============================================================================

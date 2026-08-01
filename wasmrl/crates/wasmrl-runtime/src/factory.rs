@@ -13,8 +13,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use wasmtime::component::Component;
 
+use crate::bindings::EnvPre;
 use crate::config::{PolicyConfig, RuntimeConfig};
-use crate::engine::EngineContext;
+use crate::engine::{EngineContext, EnvState};
 use crate::error::RuntimeResult;
 use crate::instance::InstanceHandle;
 use crate::pool::SharedPool;
@@ -53,6 +54,8 @@ pub struct WasmEnvFactory {
     engine: EngineContext,
     /// Loaded component.
     component: Component,
+    /// Pre-instantiated, type-checked WasmRL bindings.
+    bindings: EnvPre<EnvState>,
     /// Runtime configuration.
     config: RuntimeConfig,
     /// Policy configuration.
@@ -68,6 +71,7 @@ impl std::fmt::Debug for WasmEnvFactory {
         f.debug_struct("WasmEnvFactory")
             .field("engine", &self.engine)
             .field("component", &"<wasmtime::component::Component>")
+            .field("bindings", &"<wasmrl::EnvPre>")
             .field("config", &self.config)
             .field("policy", &self.policy)
             .field("pool", &self.pool)
@@ -118,12 +122,16 @@ impl WasmEnvFactory {
             }
         };
 
+        let instance_pre = engine.linker().instantiate_pre(&component)?;
+        let bindings = EnvPre::new(instance_pre)?;
+
         // Create instance pool
         let pool = SharedPool::new(config.max_instances);
 
         Ok(Self {
             engine,
             component,
+            bindings,
             config,
             policy,
             pool,
@@ -160,6 +168,11 @@ impl WasmEnvFactory {
     /// Get the loaded component.
     pub fn component(&self) -> &Component {
         &self.component
+    }
+
+    /// Get the type-checked pre-instantiated environment bindings.
+    pub(crate) fn bindings(&self) -> &EnvPre<EnvState> {
+        &self.bindings
     }
 
     /// Get the runtime configuration.

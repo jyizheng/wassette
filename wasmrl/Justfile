@@ -14,6 +14,13 @@ build-release:
 test:
     cargo test --workspace
 
+# Build the real CounterEnv component and run Component Model integration tests
+test-components:
+    cargo build -p counter-env --target wasm32-wasip2 --release
+    cargo build -p malicious-loop-env --target wasm32-wasip2 --release
+    cargo build -p malicious-memory-env --target wasm32-wasip2 --release
+    cargo test --features integration --test runtime_component_test --test m8_mcp_bridge_test
+
 # Run tests with output
 test-verbose:
     cargo test --workspace -- --nocapture

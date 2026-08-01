@@ -135,6 +135,9 @@ pub struct PolicyConfig {
     /// Fuel budget per step.
     pub fuel_per_step: Option<u64>,
 
+    /// Fuel budget per reset.
+    pub fuel_per_reset: Option<u64>,
+
     /// Fuel budget per batch operation.
     pub fuel_per_batch: Option<u64>,
 
@@ -167,6 +170,9 @@ impl PolicyConfig {
         }
         if let Some(fuel) = self.fuel_per_step {
             config.fuel_per_step = fuel;
+        }
+        if let Some(fuel) = self.fuel_per_reset {
+            config.fuel_per_reset = fuel;
         }
         if let Some(ms) = self.timeout_ms_step {
             config.step_timeout = Some(Duration::from_millis(ms));

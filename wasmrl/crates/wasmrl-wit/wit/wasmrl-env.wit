@@ -43,7 +43,7 @@ interface environment {
         /// Next observation after taking the action
         observation: tensor,
         /// Reward received for the transition
-        reward: float64,
+        reward: f64,
         /// Whether the episode has terminated (goal reached or failure)
         terminated: bool,
         /// Whether the episode was truncated (time limit, etc.)
@@ -96,7 +96,7 @@ interface batch {
         /// Array of observations (one per environment)
         observations: list<tensor>,
         /// Array of rewards (one per environment)
-        rewards: list<float64>,
+        rewards: list<f64>,
         /// Array of terminated flags
         terminated: list<bool>,
         /// Array of truncated flags

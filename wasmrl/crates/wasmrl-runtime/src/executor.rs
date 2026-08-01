@@ -11,18 +11,18 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
-use anyhow::Result;
 use wasmrl_wit::{BatchStepResult, EnvConfig, SnapshotData, StepResult, Tensor};
+use wasmtime::Store;
 
-use crate::config::RuntimeConfig;
+use crate::bindings::exports::wasmrl::env::environment;
+use crate::bindings::{self, Env};
 use crate::engine::EnvState;
 use crate::error::{RuntimeError, RuntimeResult};
 use crate::factory::WasmEnvFactory;
-use crate::instance::{InstanceHandle, InstanceInfo, InstanceStatus};
+use crate::instance::InstanceHandle;
 use crate::metrics::{RuntimeMetrics, Timer};
-use crate::pool::SharedPool;
 
 /// Environment runtime for executing environment operations.
 pub struct EnvRuntime {
@@ -35,7 +35,6 @@ pub struct EnvRuntime {
 }
 
 /// State for a single environment instance.
-#[derive(Debug)]
 pub struct EnvInstanceState {
     /// Environment configuration.
     config: EnvConfig,
@@ -47,17 +46,26 @@ pub struct EnvInstanceState {
     episode_steps: u64,
     /// Latest snapshot if available.
     latest_snapshot: Option<SnapshotData>,
+    /// Wasmtime store containing this component instance.
+    store: Store<EnvState>,
+    /// Type-checked bindings for the component instance.
+    bindings: Env,
+    /// Handle allocated by the guest environment.
+    guest_handle: environment::EnvHandle,
 }
 
-impl EnvInstanceState {
-    fn new(config: EnvConfig) -> Self {
-        Self {
-            config,
-            seed: 0,
-            initialized: false,
-            episode_steps: 0,
-            latest_snapshot: None,
-        }
+impl std::fmt::Debug for EnvInstanceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvInstanceState")
+            .field("config", &self.config)
+            .field("seed", &self.seed)
+            .field("initialized", &self.initialized)
+            .field("episode_steps", &self.episode_steps)
+            .field("latest_snapshot", &self.latest_snapshot)
+            .field("store", &"<wasmtime::Store>")
+            .field("bindings", &"<wasmrl::Env>")
+            .field("guest_handle", &self.guest_handle)
+            .finish()
     }
 }
 
@@ -71,9 +79,137 @@ impl EnvRuntime {
         }
     }
 
+    fn prepare_operation(
+        state: &mut EnvInstanceState,
+        fuel: u64,
+        timeout: Option<Duration>,
+        operation: &str,
+    ) -> RuntimeResult<()> {
+        if fuel > 0 {
+            state
+                .store
+                .set_fuel(fuel)
+                .map_err(|_| RuntimeError::fuel_exhausted(operation))?;
+        } else {
+            // A store may still have fuel enabled for a different operation.
+            let _ = state.store.set_fuel(u64::MAX);
+        }
+        state.store.data_mut().fuel_consumed = 0;
+        state.store.data_mut().clear_error();
+        let deadline = timeout
+            .map(|duration| duration.as_millis().max(1) as u64)
+            .unwrap_or(u64::MAX);
+        state.store.set_epoch_deadline(deadline);
+        Ok(())
+    }
+
+    fn map_call_error(
+        handle: InstanceHandle,
+        operation: &str,
+        timeout: Option<Duration>,
+        error: anyhow::Error,
+    ) -> RuntimeError {
+        match error.downcast_ref::<wasmtime::Trap>() {
+            Some(wasmtime::Trap::OutOfFuel) => RuntimeError::fuel_exhausted(operation),
+            Some(wasmtime::Trap::Interrupt) => {
+                let limit_ms = timeout
+                    .map(|duration| duration.as_millis() as u64)
+                    .unwrap_or_default();
+                RuntimeError::timeout(operation, limit_ms, limit_ms)
+            }
+            _ => RuntimeError::instance_trapped(handle.id, error.to_string()),
+        }
+    }
+
+    fn record_fuel(state: &mut EnvInstanceState, fuel: u64) {
+        if fuel == 0 {
+            return;
+        }
+        if let Ok(remaining) = state.store.get_fuel() {
+            state.store.data_mut().fuel_consumed = fuel.saturating_sub(remaining);
+        }
+    }
+
     /// Initialize an environment instance with configuration.
     pub fn init(&mut self, handle: InstanceHandle, config: EnvConfig) -> RuntimeResult<()> {
-        let state = EnvInstanceState::new(config);
+        if self.factory.pool().get_info(handle).is_none() {
+            return Err(RuntimeError::instance_not_found(handle.id));
+        }
+
+        if self
+            .env_states
+            .get(&handle.id)
+            .is_some_and(|state| state.config.config_json == config.config_json)
+        {
+            return Ok(());
+        }
+
+        if let Some(mut previous) = self.env_states.remove(&handle.id) {
+            let _ = Self::prepare_operation(
+                &mut previous,
+                self.factory.config().fuel_per_reset,
+                self.factory.config().reset_timeout,
+                "close",
+            );
+            let _ = previous
+                .bindings
+                .wasmrl_env_environment()
+                .call_close(&mut previous.store, previous.guest_handle);
+        }
+
+        let store_state = EnvState::with_memory_limit(
+            self.factory
+                .config()
+                .max_memory_bytes
+                .min(usize::MAX as u64) as usize,
+        );
+        let mut store = if self.factory.config().fuel_enabled() {
+            self.factory
+                .engine()
+                .create_store_with_fuel(store_state, u64::MAX)
+                .map_err(|e| RuntimeError::instantiation(e.to_string()))?
+        } else {
+            self.factory.engine().create_store(store_state)
+        };
+        let init_fuel = self.factory.config().fuel_per_reset;
+        if init_fuel > 0 {
+            store
+                .set_fuel(init_fuel)
+                .map_err(|_| RuntimeError::fuel_exhausted("init"))?;
+        }
+        store.set_epoch_deadline(
+            self.factory
+                .config()
+                .reset_timeout
+                .map(|duration| duration.as_millis().max(1) as u64)
+                .unwrap_or(u64::MAX),
+        );
+        let bindings = self
+            .factory
+            .bindings()
+            .instantiate(&mut store)
+            .map_err(|e| RuntimeError::instantiation(e.to_string()))?;
+        let guest_config = environment::EnvConfig {
+            config_json: config.config_json.clone(),
+        };
+        let guest_handle = bindings
+            .wasmrl_env_environment()
+            .call_init(&mut store, &guest_config)
+            .map_err(|error| {
+                Self::map_call_error(handle, "init", self.factory.config().reset_timeout, error)
+            })?
+            .map_err(RuntimeError::execution)?;
+
+        let state = EnvInstanceState {
+            config,
+            seed: 0,
+            initialized: false,
+            episode_steps: 0,
+            latest_snapshot: None,
+            store,
+            bindings,
+            guest_handle,
+        };
         self.env_states.insert(handle.id, state);
         Ok(())
     }
@@ -83,23 +219,50 @@ impl EnvRuntime {
     /// Returns the initial observation.
     pub fn reset(&mut self, handle: InstanceHandle, seed: u64) -> RuntimeResult<Tensor> {
         let timer = Timer::start();
+        let fuel = self.factory.config().fuel_per_reset;
+        let timeout = self.factory.config().reset_timeout;
+        let result = {
+            let state = self
+                .env_states
+                .get_mut(&handle.id)
+                .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
+            Self::prepare_operation(state, fuel, timeout, "reset")?;
 
-        let state = self
-            .env_states
-            .get_mut(&handle.id)
-            .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
+            match state.bindings.wasmrl_env_environment().call_reset(
+                &mut state.store,
+                state.guest_handle,
+                seed,
+            ) {
+                Ok(Ok(observation)) => {
+                    Self::record_fuel(state, fuel);
+                    state.seed = seed;
+                    state.initialized = true;
+                    state.episode_steps = 0;
+                    Ok(bindings::lift_tensor(observation))
+                }
+                Ok(Err(message)) => Err(RuntimeError::execution(message)),
+                Err(error) => {
+                    state.store.data_mut().record_trap(&error.to_string());
+                    Err(Self::map_call_error(handle, "reset", timeout, error))
+                }
+            }
+        };
 
-        state.seed = seed;
-        state.initialized = true;
-        state.episode_steps = 0;
-
-        // Record metrics
-        self.metrics.record_reset(timer.elapsed());
-        self.factory.pool().record_reset(handle)?;
-
-        // Return placeholder observation
-        // In real implementation, this would call the Wasm component
-        Ok(Tensor::zeros(wasmrl_wit::DType::Float32, vec![1]))
+        let elapsed = timer.elapsed();
+        self.metrics.record_reset(elapsed);
+        match result {
+            Ok(observation) => {
+                self.factory.pool().record_reset(handle)?;
+                Ok(observation)
+            }
+            Err(error) => {
+                if matches!(error, RuntimeError::InstanceTrapped { .. }) {
+                    self.metrics.record_trap();
+                    self.factory.pool().mark_error(handle, true)?;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Execute a single step.
@@ -107,28 +270,54 @@ impl EnvRuntime {
     /// Returns the step result (observation, reward, done, info).
     pub fn step(&mut self, handle: InstanceHandle, action: &Tensor) -> RuntimeResult<StepResult> {
         let timer = Timer::start();
+        let fuel = self.factory.config().fuel_per_step;
+        let timeout = self.factory.config().step_timeout;
+        let lowered_action = bindings::lower_tensor(action);
+        let result = {
+            let state = self
+                .env_states
+                .get_mut(&handle.id)
+                .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
 
-        let state = self
-            .env_states
-            .get_mut(&handle.id)
-            .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
+            if !state.initialized {
+                return Err(RuntimeError::execution(
+                    "Environment not initialized, call reset first",
+                ));
+            }
+            Self::prepare_operation(state, fuel, timeout, "step")?;
 
-        if !state.initialized {
-            return Err(RuntimeError::execution(
-                "Environment not initialized, call reset first",
-            ));
-        }
+            match state.bindings.wasmrl_env_environment().call_step(
+                &mut state.store,
+                state.guest_handle,
+                &lowered_action,
+            ) {
+                Ok(Ok(step_result)) => {
+                    Self::record_fuel(state, fuel);
+                    state.episode_steps += 1;
+                    Ok(bindings::lift_step_result(step_result))
+                }
+                Ok(Err(message)) => Err(RuntimeError::execution(message)),
+                Err(error) => {
+                    state.store.data_mut().record_trap(&error.to_string());
+                    Err(Self::map_call_error(handle, "step", timeout, error))
+                }
+            }
+        };
 
-        state.episode_steps += 1;
-
-        // Record metrics
         self.metrics.record_step(timer.elapsed());
-        self.factory.pool().record_step(handle)?;
-
-        // Return placeholder result
-        // In real implementation, this would call the Wasm component
-        let obs = Tensor::zeros(wasmrl_wit::DType::Float32, vec![1]);
-        Ok(StepResult::new(obs, 0.0, false, false))
+        match result {
+            Ok(step_result) => {
+                self.factory.pool().record_step(handle)?;
+                Ok(step_result)
+            }
+            Err(error) => {
+                if matches!(error, RuntimeError::InstanceTrapped { .. }) {
+                    self.metrics.record_trap();
+                    self.factory.pool().mark_error(handle, true)?;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Reset multiple environments in batch.
@@ -181,11 +370,7 @@ impl EnvRuntime {
                     result.infos.push(step_result.info);
                 }
                 Err(e) => {
-                    // Mark instance as errored
-                    self.factory.pool().mark_error(*handle, true)?;
-                    self.metrics.record_trap();
-
-                    // Fill with error placeholder
+                    // Preserve batch shape while surfacing the per-instance error.
                     result
                         .observations
                         .push(Tensor::zeros(wasmrl_wit::DType::Float32, vec![1]));
@@ -203,10 +388,12 @@ impl EnvRuntime {
     }
 
     /// Take a snapshot of an environment instance.
-    pub fn snapshot(&self, handle: InstanceHandle) -> RuntimeResult<SnapshotData> {
+    pub fn snapshot(&mut self, handle: InstanceHandle) -> RuntimeResult<SnapshotData> {
+        let fuel = self.factory.config().fuel_per_reset;
+        let timeout = self.factory.config().reset_timeout;
         let state = self
             .env_states
-            .get(&handle.id)
+            .get_mut(&handle.id)
             .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
 
         if !state.initialized {
@@ -214,16 +401,17 @@ impl EnvRuntime {
                 "Cannot snapshot uninitialized environment",
             ));
         }
+        Self::prepare_operation(state, fuel, timeout, "snapshot")?;
 
-        // Create snapshot data
-        // In real implementation, this would call the Wasm component
-        let data = serde_json::to_vec(&serde_json::json!({
-            "seed": state.seed,
-            "episode_steps": state.episode_steps,
-        }))
-        .map_err(|e| RuntimeError::execution(e.to_string()))?;
-
-        Ok(SnapshotData::new(data))
+        let snapshot = state
+            .bindings
+            .wasmrl_env_snapshot()
+            .call_snapshot(&mut state.store, state.guest_handle)
+            .map_err(|error| Self::map_call_error(handle, "snapshot", timeout, error))?
+            .map_err(RuntimeError::execution)?;
+        let snapshot = bindings::lift_snapshot(snapshot);
+        state.latest_snapshot = Some(snapshot.clone());
+        Ok(snapshot)
     }
 
     /// Restore an environment instance from a snapshot.
@@ -239,22 +427,82 @@ impl EnvRuntime {
             )));
         }
 
+        let fuel = self.factory.config().fuel_per_reset;
+        let timeout = self.factory.config().reset_timeout;
         let state = self
             .env_states
             .get_mut(&handle.id)
             .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
 
+        Self::prepare_operation(state, fuel, timeout, "restore")?;
+        let lowered = bindings::lower_snapshot(snapshot);
+        state
+            .bindings
+            .wasmrl_env_snapshot()
+            .call_restore(&mut state.store, state.guest_handle, &lowered)
+            .map_err(|error| Self::map_call_error(handle, "restore", timeout, error))?
+            .map_err(RuntimeError::execution)?;
+
         state.initialized = true;
         state.latest_snapshot = Some(snapshot.clone());
-
         Ok(())
+    }
+
+    /// Query the observation space declared by an environment instance.
+    pub fn observation_space(&mut self, handle: InstanceHandle) -> RuntimeResult<Tensor> {
+        let fuel = self.factory.config().fuel_per_reset;
+        let timeout = self.factory.config().reset_timeout;
+        let state = self
+            .env_states
+            .get_mut(&handle.id)
+            .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
+        Self::prepare_operation(state, fuel, timeout, "observation-space")?;
+        state
+            .bindings
+            .wasmrl_env_environment()
+            .call_observation_space(&mut state.store, state.guest_handle)
+            .map_err(|error| Self::map_call_error(handle, "observation-space", timeout, error))?
+            .map(bindings::lift_tensor)
+            .map_err(RuntimeError::execution)
+    }
+
+    /// Query the action space declared by an environment instance.
+    pub fn action_space(&mut self, handle: InstanceHandle) -> RuntimeResult<Tensor> {
+        let fuel = self.factory.config().fuel_per_reset;
+        let timeout = self.factory.config().reset_timeout;
+        let state = self
+            .env_states
+            .get_mut(&handle.id)
+            .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
+        Self::prepare_operation(state, fuel, timeout, "action-space")?;
+        state
+            .bindings
+            .wasmrl_env_environment()
+            .call_action_space(&mut state.store, state.guest_handle)
+            .map_err(|error| Self::map_call_error(handle, "action-space", timeout, error))?
+            .map(bindings::lift_tensor)
+            .map_err(RuntimeError::execution)
     }
 
     /// Close an environment instance.
     pub fn close(&mut self, handle: InstanceHandle) -> RuntimeResult<()> {
-        self.env_states.remove(&handle.id);
+        let fuel = self.factory.config().fuel_per_reset;
+        let timeout = self.factory.config().reset_timeout;
+        let mut state = self
+            .env_states
+            .remove(&handle.id)
+            .ok_or_else(|| RuntimeError::instance_not_found(handle.id))?;
+        Self::prepare_operation(&mut state, fuel, timeout, "close")?;
+        let close_result = match state
+            .bindings
+            .wasmrl_env_environment()
+            .call_close(&mut state.store, state.guest_handle)
+        {
+            Ok(result) => result.map_err(RuntimeError::execution),
+            Err(error) => Err(Self::map_call_error(handle, "close", timeout, error)),
+        };
         self.factory.pool().release(handle)?;
-        Ok(())
+        close_result
     }
 
     /// Get runtime metrics.
@@ -359,15 +607,6 @@ mod tests {
 
     // Note: Full runtime tests require actual Wasm components
     // These are tested in integration tests
-
-    #[test]
-    fn test_env_instance_state_new() {
-        let config = EnvConfig::empty();
-        let state = EnvInstanceState::new(config);
-        assert!(!state.initialized);
-        assert_eq!(state.seed, 0);
-        assert_eq!(state.episode_steps, 0);
-    }
 
     #[test]
     fn test_batch_size_mismatch_error() {

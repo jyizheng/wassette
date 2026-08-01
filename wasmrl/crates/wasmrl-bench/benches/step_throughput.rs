@@ -1,179 +1,107 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! Step Throughput Benchmark
-//!
-//! Measures the throughput of step operations in both scalar and batch modes.
-//! Target: batch_step >= 1.2x scalar loop at N >= 256
+//! Scalar and batched step-throughput benchmarks using the real WasmRL runtime.
+
+mod support;
 
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use wasmrl_runtime::{EnvConfig, EnvFactory, EnvPool, EnvPoolConfig, WasmEnvInstance};
+use support::{component_path, counter_config, create_factory, RuntimeSet};
 use wasmrl_wit::{DType, Tensor};
 
-/// Path to the counter environment component.
-const COUNTER_ENV_PATH: &str =
-    "../../envs/counter_env/target/wasm32-wasip2/release/counter_env.wasm";
-
-/// Create a simple action tensor.
 fn make_action(value: i32) -> Tensor {
     Tensor::new(DType::Int32, vec![1], value.to_le_bytes().to_vec())
 }
 
-/// Benchmark scalar step loop (baseline).
 fn bench_scalar_step_loop(c: &mut Criterion) {
+    let Some(path) = component_path("counter_env.wasm") else {
+        eprintln!("build counter-env for wasm32-wasip2 before running benchmarks");
+        return;
+    };
     let mut group = c.benchmark_group("step_throughput/scalar");
     group.measurement_time(Duration::from_secs(10));
 
-    // Check if component exists
-    let component_path = std::path::Path::new(COUNTER_ENV_PATH);
-    if !component_path.exists() {
-        eprintln!(
-            "Counter env not found at {:?}, skipping benchmark",
-            component_path
-        );
-        return;
-    }
-
-    let component_bytes = std::fs::read(COUNTER_ENV_PATH).expect("Failed to read component");
-    let config = EnvConfig::default();
-    let factory = EnvFactory::new().expect("Failed to create factory");
-
-    for num_envs in [1, 4, 16, 64, 256] {
-        group.throughput(Throughput::Elements(num_envs as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(num_envs), &num_envs, |b, &n| {
-            // Create instances
-            let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
-                .map(|_| factory.create(&component_bytes, &config).unwrap())
-                .collect();
-
-            // Initialize all
-            for instance in &mut instances {
-                instance.init().unwrap();
-            }
-
-            let action = make_action(1); // increment
-
+    for count in [1, 4, 16, 64, 256] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            let factory = create_factory(&path, count);
+            let mut environments = RuntimeSet::new(factory, count, &counter_config());
+            let action = make_action(2);
             b.iter(|| {
-                // Scalar loop: step each instance sequentially
-                for instance in &mut instances {
-                    let result = instance.step(black_box(&action)).unwrap();
-                    black_box(result);
+                for handle in &environments.handles {
+                    black_box(
+                        environments
+                            .runtime
+                            .step(*handle, black_box(&action))
+                            .unwrap(),
+                    );
                 }
             });
         });
     }
-
     group.finish();
 }
 
-/// Benchmark batch step (optimized path).
 fn bench_batch_step(c: &mut Criterion) {
+    let Some(path) = component_path("counter_env.wasm") else {
+        return;
+    };
     let mut group = c.benchmark_group("step_throughput/batch");
     group.measurement_time(Duration::from_secs(10));
 
-    let component_path = std::path::Path::new(COUNTER_ENV_PATH);
-    if !component_path.exists() {
-        eprintln!("Counter env not found, skipping batch benchmark");
-        return;
-    }
-
-    let component_bytes = std::fs::read(COUNTER_ENV_PATH).expect("Failed to read component");
-    let config = EnvConfig::default();
-    let factory = EnvFactory::new().expect("Failed to create factory");
-
-    for num_envs in [1, 4, 16, 64, 256] {
-        group.throughput(Throughput::Elements(num_envs as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(num_envs), &num_envs, |b, &n| {
-            // Create pool
-            let pool_config = EnvPoolConfig {
-                num_envs: n,
-                max_memory_per_env: 64 * 1024 * 1024,
-                enable_snapshots: false,
-                auto_reset: false,
-            };
-
-            let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..n)
-                .map(|_| factory.create(&component_bytes, &config).unwrap())
-                .collect();
-
-            // Initialize all
-            for instance in &mut instances {
-                instance.init().unwrap();
-            }
-
-            let actions: Vec<Tensor> = (0..n).map(|_| make_action(1)).collect();
-
+    for count in [1, 4, 16, 64, 256] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            let factory = create_factory(&path, count);
+            let mut environments = RuntimeSet::new(factory, count, &counter_config());
+            let actions = vec![make_action(2); count];
             b.iter(|| {
-                // Batch step: step all instances (in this impl, still sequential but structure ready for parallel)
-                let results: Vec<_> = instances
-                    .iter_mut()
-                    .zip(actions.iter())
-                    .map(|(inst, action)| inst.step(black_box(action)).unwrap())
-                    .collect();
-                black_box(results);
+                black_box(
+                    environments
+                        .runtime
+                        .step_many(&environments.handles, black_box(&actions))
+                        .unwrap(),
+                );
             });
         });
     }
-
     group.finish();
 }
 
-/// Compare scalar vs batch at target size (N=256).
 fn bench_step_comparison(c: &mut Criterion) {
+    let Some(path) = component_path("counter_env.wasm") else {
+        return;
+    };
+    const COUNT: usize = 256;
     let mut group = c.benchmark_group("step_throughput/comparison_n256");
     group.measurement_time(Duration::from_secs(15));
+    group.throughput(Throughput::Elements(COUNT as u64));
 
-    let component_path = std::path::Path::new(COUNTER_ENV_PATH);
-    if !component_path.exists() {
-        return;
-    }
-
-    let component_bytes = std::fs::read(COUNTER_ENV_PATH).expect("Failed to read component");
-    let config = EnvConfig::default();
-    let factory = EnvFactory::new().expect("Failed to create factory");
-
-    const N: usize = 256;
-    group.throughput(Throughput::Elements(N as u64));
-
-    // Create shared instances
-    let mut instances: Vec<Box<dyn WasmEnvInstance>> = (0..N)
-        .map(|_| factory.create(&component_bytes, &config).unwrap())
-        .collect();
-
-    for instance in &mut instances {
-        instance.init().unwrap();
-    }
-
-    let action = make_action(1);
-    let actions: Vec<Tensor> = (0..N).map(|_| make_action(1)).collect();
-
+    let factory = create_factory(&path, COUNT * 2);
+    let mut scalar = RuntimeSet::new(factory.clone(), COUNT, &counter_config());
+    let action = make_action(2);
     group.bench_function("scalar_loop", |b| {
         b.iter(|| {
-            for instance in &mut instances {
-                let result = instance.step(black_box(&action)).unwrap();
-                black_box(result);
+            for handle in &scalar.handles {
+                black_box(scalar.runtime.step(*handle, black_box(&action)).unwrap());
             }
         });
     });
 
-    // Re-initialize for batch test
-    for instance in &mut instances {
-        instance.init().unwrap();
-    }
-
+    let mut batch = RuntimeSet::new(factory, COUNT, &counter_config());
+    let actions = vec![make_action(2); COUNT];
     group.bench_function("batch", |b| {
         b.iter(|| {
-            let results: Vec<_> = instances
-                .iter_mut()
-                .zip(actions.iter())
-                .map(|(inst, action)| inst.step(black_box(action)).unwrap())
-                .collect();
-            black_box(results);
+            black_box(
+                batch
+                    .runtime
+                    .step_many(&batch.handles, black_box(&actions))
+                    .unwrap(),
+            );
         });
     });
-
     group.finish();
 }
 
