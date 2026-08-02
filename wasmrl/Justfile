@@ -2,6 +2,9 @@
 
 set shell := ["bash", "-c"]
 
+python := env_var_or_default("PYTHON", ".venv/bin/python")
+component := "target/wasm32-wasip2/release/counter_env.wasm"
+
 # Build all crates
 build:
     cargo build --workspace
@@ -20,6 +23,31 @@ test-components:
     cargo build -p malicious-loop-env --target wasm32-wasip2 --release
     cargo build -p malicious-memory-env --target wasm32-wasip2 --release
     cargo test --features integration --test runtime_component_test --test m8_mcp_bridge_test
+
+# Create a local training environment. Requires a visible CUDA GPU by default.
+setup-gpu:
+    scripts/setup_gpu_node.sh
+
+# Build the CounterEnv component and install the Python extension in the active venv.
+mvp-build:
+    cargo build -p counter-env --target wasm32-wasip2 --release
+    {{python}} -m maturin develop --release --manifest-path crates/wasmrl-py/Cargo.toml
+
+# Test the Python/SB3 adapter against the real CounterEnv component.
+test-python-mvp:
+    {{python}} -m unittest discover -s tests/python -p 'test_*.py' -v
+
+# Train PPO. Example: just mvp-train cuda 32 100000 artifacts/gpu-run
+mvp-train device="auto" num_envs="8" total_timesteps="10000" output_dir="artifacts/ppo-counter":
+    {{python}} examples/python/ppo_training.py --component {{component}} --device {{device}} --num-envs {{num_envs}} --total-timesteps {{total_timesteps}} --output {{output_dir}}
+
+# Evaluate the saved PPO model against a random baseline.
+mvp-evaluate device="auto" num_envs="8" episodes="100" output_dir="artifacts/ppo-counter":
+    {{python}} examples/python/evaluate_ppo.py --model {{output_dir}}/model.zip --component {{component}} --device {{device}} --num-envs {{num_envs}} --episodes {{episodes}}
+
+# Run build, training, and thresholded evaluation end to end.
+mvp-e2e device="cpu" num_envs="8" total_timesteps="10000":
+    DEVICE={{device}} NUM_ENVS={{num_envs}} TOTAL_TIMESTEPS={{total_timesteps}} PYTHON={{python}} scripts/mvp_e2e.sh
 
 # Run tests with output
 test-verbose:

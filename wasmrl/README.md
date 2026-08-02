@@ -3,8 +3,8 @@
 WasmRL is a high-performance, security-oriented runtime for executing reinforcement learning environments as WebAssembly components. It builds on top of [Wassette](https://github.com/microsoft/wassette) and provides:
 
 - **In-process execution** with high throughput
-- **Batched stepping** for vectorized environment execution
-- **Instance pooling** and micro-batching for efficiency
+- **Vectorized stepping API** for RL framework integration
+- **Instance pooling** for reusable Wasm environments
 - **Snapshot/restore** for reset-heavy workloads
 - **Resource budgets** (fuel, memory, timeout) with telemetry
 - **Python VecEnv API** for integration with RL algorithms like PPO
@@ -23,7 +23,7 @@ WasmRL is a high-performance, security-oriented runtime for executing reinforcem
 ┌──────────────────▼──────────────────────┐
 │   wasmrl-runtime (In-process Executor)  │
 │  ├─ Instance Pool                       │
-│  ├─ Batch Scheduler                     │
+│  ├─ Vector API Dispatcher               │
 │  ├─ Resource Budgets                    │
 │  └─ Metrics/Telemetry                   │
 └──────────────────┬──────────────────────┘
@@ -47,6 +47,70 @@ cargo build --workspace
 ```bash
 cargo test --workspace
 ```
+
+## PPO MVP on a GPU Node
+
+The MVP runs Wasm environments on CPU through Wasmtime and places the PPO
+policy network on a CUDA GPU through PyTorch. The current runtime dispatches
+the vector environment handles serially, so increasing `num_envs` improves
+rollout batching but does not yet parallelize Wasm execution.
+
+### One-time setup
+
+The node needs Rust, Python 3, a working NVIDIA driver, and a CUDA-enabled
+PyTorch wheel. From this directory:
+
+```bash
+# Optional when the cluster uses a dedicated PyTorch wheel index:
+export TORCH_INDEX_URL="CLUSTER_APPROVED_PYTORCH_INDEX"
+
+scripts/setup_gpu_node.sh
+source .venv/bin/activate
+```
+
+`setup_gpu_node.sh` creates `.venv`, installs the training dependencies,
+builds the real `counter_env.wasm` component, installs `wasmrl_py`, and fails
+if PyTorch cannot see CUDA. Set `REQUIRE_CUDA=0` for a CPU-only development
+machine. Choose the CUDA wheel index that matches the driver policy on the
+target cluster when setting `TORCH_INDEX_URL`.
+
+### Train and evaluate
+
+```bash
+# Arguments: device, num_envs, total_timesteps, output directory
+just mvp-train cuda 32 100000 artifacts/gpu-run
+
+# Arguments: device, num_envs, evaluation episodes, output directory
+just mvp-evaluate cuda 32 100 artifacts/gpu-run
+```
+
+Training writes `model.zip`, `training.json`, and TensorBoard events under the
+output directory. Evaluation writes `evaluation.json`, compares the trained
+policy with a seeded random baseline, and returns a non-zero exit code unless
+the configured success and reward-improvement thresholds pass.
+
+Run the complete thresholded flow with:
+
+```bash
+just mvp-e2e cuda 32 100000
+```
+
+Without `just`, use the scripts directly:
+
+```bash
+DEVICE=cuda NUM_ENVS=32 TOTAL_TIMESTEPS=100000 scripts/mvp_e2e.sh
+```
+
+To inspect GPU use while training:
+
+```bash
+nvidia-smi -l 1
+tensorboard --logdir artifacts/gpu-run/tensorboard
+```
+
+The CounterEnv policy is intentionally tiny, so high GPU utilization is not an
+MVP acceptance criterion. The acceptance criterion is a real Wasm-to-PPO
+training loop whose trained success rate and reward beat the random baseline.
 
 ### Code Formatting & Linting
 

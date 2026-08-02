@@ -51,6 +51,8 @@ pub struct PyWasmVecEnv {
     episode_rewards: Vec<f64>,
     /// Per-environment episode lengths.
     episode_lengths: Vec<u64>,
+    /// Number of completed episodes per environment, used to derive reset seeds.
+    episode_counts: Vec<u64>,
 }
 
 #[pymethods]
@@ -123,6 +125,7 @@ impl PyWasmVecEnv {
             dones: vec![true; num_envs],
             episode_rewards: vec![0.0; num_envs],
             episode_lengths: vec![0; num_envs],
+            episode_counts: vec![0; num_envs],
         })
     }
 
@@ -135,7 +138,10 @@ impl PyWasmVecEnv {
         options: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyDict>)> {
         let _ = options;
-        let base_seed = seed.unwrap_or(self.seed);
+        if let Some(seed) = seed {
+            self.seed = seed;
+        }
+        let base_seed = self.seed;
         let seeds: Vec<u64> = (0..self.num_envs)
             .map(|i| base_seed.wrapping_add(i as u64))
             .collect();
@@ -154,6 +160,7 @@ impl PyWasmVecEnv {
         self.dones.fill(false);
         self.episode_rewards.fill(0.0);
         self.episode_lengths.fill(0);
+        self.episode_counts.fill(0);
 
         let obs_array = stack_observations(py, &observations)?;
         let info = PyDict::new(py);
@@ -186,6 +193,8 @@ impl PyWasmVecEnv {
 
         let mut final_observations: Vec<Option<Tensor>> = vec![None; self.num_envs];
         let mut final_infos: Vec<Option<String>> = vec![None; self.num_envs];
+        let mut final_episode_rewards: Vec<Option<f64>> = vec![None; self.num_envs];
+        let mut final_episode_lengths: Vec<Option<u64>> = vec![None; self.num_envs];
 
         for i in 0..self.num_envs {
             let done = batch.terminated[i] || batch.truncated[i];
@@ -193,11 +202,20 @@ impl PyWasmVecEnv {
             self.episode_lengths[i] += 1;
             self.dones[i] = done;
 
+            if done {
+                final_episode_rewards[i] = Some(self.episode_rewards[i]);
+                final_episode_lengths[i] = Some(self.episode_lengths[i]);
+            }
+
             if done && self.auto_reset {
                 final_observations[i] = Some(batch.observations[i].clone());
                 final_infos[i] = batch.infos[i].clone();
 
-                let seed = self.seed.wrapping_add(i as u64);
+                self.episode_counts[i] = self.episode_counts[i].wrapping_add(1);
+                let seed = self
+                    .seed
+                    .wrapping_add(i as u64)
+                    .wrapping_add(self.episode_counts[i].wrapping_mul(self.num_envs as u64));
                 batch.observations[i] = self
                     .runtime
                     .reset(self.handles[i], seed)
@@ -224,6 +242,8 @@ impl PyWasmVecEnv {
         }
         info.set_item("final_observation", final_obs_list)?;
         info.set_item("final_info", final_infos)?;
+        info.set_item("final_episode_rewards", final_episode_rewards)?;
+        info.set_item("final_episode_lengths", final_episode_lengths)?;
         info.set_item("episode_rewards", self.episode_rewards.clone())?;
         info.set_item("episode_lengths", self.episode_lengths.clone())?;
 
@@ -267,6 +287,7 @@ impl PyWasmVecEnv {
             self.dones[i] = false;
             self.episode_rewards[i] = 0.0;
             self.episode_lengths[i] = 0;
+            self.episode_counts[i] = 0;
         }
 
         stack_observations(py, &observations)

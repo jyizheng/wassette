@@ -132,8 +132,12 @@ impl EngineContext {
         }
 
         // Memory configuration
-        config.max_wasm_stack(512 * 1024); // 512 KB stack
-        config.memory_reservation_for_growth(1024 * 1024 * 1024); // 1 GB reserve
+        config.max_wasm_stack(512 * 1024);
+        // Keep virtual address-space reservations aligned with the configured
+        // per-environment limit. Wasmtime otherwise reserves 4 GiB per linear
+        // memory on 64-bit hosts, which is costly for vectorized Python training.
+        config.memory_reservation(runtime_config.max_memory_bytes);
+        config.memory_reservation_for_growth(runtime_config.max_memory_bytes);
 
         let engine = Arc::new(Engine::new(&config)?);
         if epoch_interruption {

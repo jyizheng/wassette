@@ -2,324 +2,205 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-"""
-PPO Training Example with WasmRL and Stable-Baselines3.
+"""Train a Stable-Baselines3 PPO policy against a WasmRL component."""
 
-This example demonstrates how to train a PPO agent on a WasmRL
-environment using the popular Stable-Baselines3 library.
+from __future__ import annotations
 
-Prerequisites:
-    pip install stable-baselines3
-    cd wasmrl/crates/wasmrl-py && maturin develop
-"""
+import argparse
+import json
+import time
+from pathlib import Path
+from typing import Any, Dict, List
 
 import numpy as np
-from typing import Any, Dict, Optional, Tuple
+import stable_baselines3
+import torch
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.utils import set_random_seed
 
-# Import wasmrl
-try:
-    import wasmrl_py as wasmrl
-except ImportError:
-    print("wasmrl_py not installed. Build with: cd wasmrl/crates/wasmrl-py && maturin develop")
-    exit(1)
-
-# Try importing stable-baselines3
-try:
-    from stable_baselines3 import PPO
-    from stable_baselines3.common.vec_env import VecEnv
-    from stable_baselines3.common.callbacks import BaseCallback
-    HAS_SB3 = True
-except ImportError:
-    print("Warning: stable-baselines3 not installed. Install with: pip install stable-baselines3")
-    HAS_SB3 = False
+from wasmrl_sb3 import WasmRLVecEnv, device_summary, resolve_device
 
 
-class WasmRLVecEnvWrapper(VecEnv if HAS_SB3 else object):
-    """
-    Stable-Baselines3 compatible wrapper for WasmVecEnv.
-    
-    This wrapper bridges WasmRL's vectorized environment interface
-    with SB3's VecEnv interface for seamless integration.
-    """
-    
-    def __init__(
-        self,
-        component_path: str,
-        num_envs: int = 8,
-        max_memory_mb: int = 64,
-        fuel_per_step: int = 1_000_000,
-    ):
-        """
-        Initialize the wrapper.
-        
-        Args:
-            component_path: Path to the .wasm component file.
-            num_envs: Number of parallel environments.
-            max_memory_mb: Maximum memory per environment in MB.
-            fuel_per_step: Fuel budget per step.
-        """
-        # Create WasmRL config
-        config = wasmrl.EnvConfig(
-            num_envs=num_envs,
-            max_memory_mb=max_memory_mb,
-            fuel_per_step=fuel_per_step,
-            auto_reset=True,
-        )
-        
-        # Create the WasmRL vectorized environment
-        self.wasmrl_env = wasmrl.WasmVecEnv(component_path, config)
-        
-        # Get spaces from wasmrl
-        obs_space = self.wasmrl_env.single_observation_space
-        act_space = self.wasmrl_env.single_action_space
-        
-        # Convert to gymnasium spaces
-        if HAS_SB3:
-            import gymnasium as gym
-            
-            # Create observation space
-            if hasattr(obs_space, 'low'):
-                # Box space
-                observation_space = gym.spaces.Box(
-                    low=obs_space.low,
-                    high=obs_space.high,
-                    shape=tuple(obs_space.shape),
-                    dtype=np.float32,
-                )
-            else:
-                # Discrete observation (treated as Box for now)
-                observation_space = gym.spaces.Box(
-                    low=-np.inf,
-                    high=np.inf,
-                    shape=(1,),
-                    dtype=np.float32,
-                )
-            
-            # Create action space
-            if hasattr(act_space, 'n'):
-                # Discrete action space
-                action_space = gym.spaces.Discrete(act_space.n)
-            else:
-                # Box action space
-                action_space = gym.spaces.Box(
-                    low=act_space.low,
-                    high=act_space.high,
-                    shape=tuple(act_space.shape),
-                    dtype=np.float32,
-                )
-            
-            # Initialize VecEnv base class
-            super().__init__(num_envs, observation_space, action_space)
-        
-        self.num_envs = num_envs
-        self._obs_space = obs_space
-        self._act_space = act_space
-    
-    def reset(self) -> np.ndarray:
-        """Reset all environments."""
-        obs, info = self.wasmrl_env.reset()
-        return obs
-    
-    def step_async(self, actions: np.ndarray) -> None:
-        """Store actions for later execution."""
-        self._actions = actions
-    
-    def step_wait(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
-        """Execute stored actions and return results."""
-        obs, rewards, dones, truncs, info = self.wasmrl_env.step(self._actions)
-        
-        # SB3 expects combined done flag in older API
-        # For newer API, we return both terminated and truncated
-        combined_dones = np.logical_or(dones, truncs)
-        
-        # Convert info to list of dicts for SB3
-        infos = []
-        for i in range(self.num_envs):
-            env_info = {}
-            if info.get('final_observation') and info['final_observation'][i] is not None:
-                env_info['terminal_observation'] = info['final_observation'][i]
-            if 'episode_rewards' in info:
-                env_info['episode'] = {
-                    'r': info['episode_rewards'][i],
-                    'l': info['episode_lengths'][i],
-                }
-            infos.append(env_info)
-        
-        return obs, rewards, combined_dones, infos
-    
-    def close(self) -> None:
-        """Close all environments."""
-        self.wasmrl_env.close()
-    
-    def render(self, mode: str = 'human') -> Optional[np.ndarray]:
-        """Render environments (not implemented)."""
-        pass
-    
-    def env_method(
-        self,
-        method_name: str,
-        *method_args,
-        indices: Optional[np.ndarray] = None,
-        **method_kwargs
-    ) -> Any:
-        """Call a method on the environments."""
-        if method_name == 'snapshot':
-            return self.wasmrl_env.snapshot_all()
-        elif method_name == 'restore':
-            return self.wasmrl_env.restore_all(*method_args)
-        return None
-    
-    def get_attr(self, attr_name: str, indices: Optional[np.ndarray] = None) -> Any:
-        """Get an attribute from the environments."""
-        return getattr(self.wasmrl_env, attr_name, None)
-    
-    def set_attr(
-        self,
-        attr_name: str,
-        value: Any,
-        indices: Optional[np.ndarray] = None
-    ) -> None:
-        """Set an attribute on the environments."""
-        pass
-    
-    def seed(self, seed: Optional[int] = None) -> None:
-        """Set the random seed."""
-        if seed is not None:
-            self.wasmrl_env.reset(seed=seed)
+WASMRL_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_COMPONENT = WASMRL_ROOT / "target/wasm32-wasip2/release/counter_env.wasm"
+DEFAULT_ENV_CONFIG = '{"initial_value":0,"target":5,"max_steps":20}'
 
 
-class RewardLoggerCallback(BaseCallback if HAS_SB3 else object):
-    """Callback for logging training progress."""
-    
-    def __init__(self, verbose: int = 0):
-        if HAS_SB3:
-            super().__init__(verbose)
-        self.episode_rewards = []
-        self.episode_lengths = []
-    
+class EpisodeLogger(BaseCallback):
+    """Collect completed episode statistics from the WasmRL adapter."""
+
+    def __init__(self, log_every: int = 100) -> None:
+        super().__init__(verbose=0)
+        self.log_every = log_every
+        self.episode_rewards: List[float] = []
+        self.episode_lengths: List[int] = []
+
     def _on_step(self) -> bool:
-        # Log episode info when available
-        for info in self.locals.get('infos', []):
-            if 'episode' in info:
-                self.episode_rewards.append(info['episode']['r'])
-                self.episode_lengths.append(info['episode']['l'])
-                
-                if len(self.episode_rewards) % 100 == 0:
-                    print(f"Episodes: {len(self.episode_rewards)}, "
-                          f"Avg reward: {np.mean(self.episode_rewards[-100:]):.2f}")
+        for info in self.locals.get("infos", []):
+            episode = info.get("episode")
+            if episode is None:
+                continue
+            self.episode_rewards.append(float(episode["r"]))
+            self.episode_lengths.append(int(episode["l"]))
+            if self.log_every and len(self.episode_rewards) % self.log_every == 0:
+                print(
+                    "episodes={} mean_reward={:.4f} mean_length={:.2f}".format(
+                        len(self.episode_rewards),
+                        np.mean(self.episode_rewards[-self.log_every :]),
+                        np.mean(self.episode_lengths[-self.log_every :]),
+                    ),
+                    flush=True,
+                )
         return True
 
 
-def train_ppo():
-    """Train a PPO agent on a WasmRL environment."""
-    if not HAS_SB3:
-        print("stable-baselines3 required for PPO training")
-        return
-    
-    print("=== PPO Training with WasmRL ===\n")
-    
-    # Create wrapped environment
-    env = WasmRLVecEnvWrapper(
-        component_path="./envs/counter_env.wasm",
-        num_envs=8,
-        max_memory_mb=64,
-        fuel_per_step=1_000_000,
+def compatible_batch_size(num_envs: int, n_steps: int, requested: int) -> int:
+    """Choose the largest requested-or-smaller batch that divides the rollout."""
+    rollout_size = num_envs * n_steps
+    upper = min(requested, rollout_size)
+    for candidate in range(upper, 0, -1):
+        if rollout_size % candidate == 0:
+            return candidate
+    return 1
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--component", type=Path, default=DEFAULT_COMPONENT)
+    parser.add_argument("--output", type=Path, default=Path("artifacts/ppo-counter"))
+    parser.add_argument("--env-config", default=DEFAULT_ENV_CONFIG)
+    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:N, or mps")
+    parser.add_argument("--num-envs", type=int, default=8)
+    parser.add_argument("--total-timesteps", type=int, default=10_000)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n-steps", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--max-memory-mb", type=int, default=64)
+    parser.add_argument("--fuel-per-step", type=int, default=1_000_000)
+    parser.add_argument("--timeout-step-ms", type=int, default=100)
+    parser.add_argument("--timeout-reset-ms", type=int, default=500)
+    parser.add_argument("--torch-threads", type=int, default=0)
+    parser.add_argument("--progress", action="store_true")
+    parser.add_argument("--verbose", type=int, default=1, choices=(0, 1, 2))
+    return parser.parse_args()
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.num_envs < 1 or args.n_steps < 2 or args.total_timesteps < 1:
+        raise ValueError("num-envs, total-timesteps, and n-steps must be positive")
+    try:
+        parsed = json.loads(args.env_config)
+    except json.JSONDecodeError as error:
+        raise ValueError("--env-config must be valid JSON: {}".format(error)) from error
+    if not isinstance(parsed, dict):
+        raise ValueError("--env-config must contain a JSON object")
+
+
+def main() -> int:
+    args = parse_args()
+    validate_args(args)
+    device = resolve_device(args.device)
+    if args.torch_threads > 0:
+        torch.set_num_threads(args.torch_threads)
+    set_random_seed(args.seed, using_cuda=device.startswith("cuda"))
+
+    component = args.component.expanduser().resolve()
+    output_dir = args.output.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    batch_size = compatible_batch_size(args.num_envs, args.n_steps, args.batch_size)
+    if batch_size != args.batch_size:
+        print(
+            "Adjusted batch size from {} to {} so it divides rollout size {}.".format(
+                args.batch_size, batch_size, args.num_envs * args.n_steps
+            )
+        )
+
+    accelerator = device_summary(device)
+    print("WasmRL PPO training")
+    print("  component: {}".format(component))
+    print("  device: {}".format(device))
+    if "cuda_device_name" in accelerator:
+        print("  gpu: {} ({} GiB)".format(
+            accelerator["cuda_device_name"], accelerator["cuda_memory_gb"]
+        ))
+    print("  vec envs: {} (current runtime dispatch is serial)".format(args.num_envs))
+    print("  timesteps: {}".format(args.total_timesteps))
+
+    env = WasmRLVecEnv(
+        component_path=component,
+        num_envs=args.num_envs,
+        config_json=args.env_config,
+        max_memory_mb=args.max_memory_mb,
+        fuel_per_step=args.fuel_per_step,
+        timeout_step_ms=args.timeout_step_ms,
+        timeout_reset_ms=args.timeout_reset_ms,
+        seed=args.seed,
     )
-    print(f"Created environment with {env.num_envs} parallel envs")
-    print(f"Observation space: {env.observation_space}")
-    print(f"Action space: {env.action_space}")
-    
-    # Create PPO agent
+    env.seed(args.seed)
+    callback = EpisodeLogger()
     model = PPO(
         "MlpPolicy",
         env,
-        verbose=1,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
+        device=device,
+        seed=args.seed,
+        verbose=args.verbose,
+        learning_rate=args.learning_rate,
+        n_steps=args.n_steps,
+        batch_size=batch_size,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
         ent_coef=0.01,
+        tensorboard_log=str(output_dir / "tensorboard"),
     )
-    print("\nCreated PPO agent")
-    
-    # Create callback
-    callback = RewardLoggerCallback()
-    
-    # Train
-    print("\nStarting training...")
-    total_timesteps = 100_000
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=callback,
-        progress_bar=True,
-    )
-    
-    # Print results
-    print(f"\nTraining completed!")
-    print(f"Total episodes: {len(callback.episode_rewards)}")
-    if callback.episode_rewards:
-        print(f"Final avg reward (last 100): {np.mean(callback.episode_rewards[-100:]):.2f}")
-    
-    # Save model
-    model.save("wasmrl_ppo_counter")
-    print("Model saved to wasmrl_ppo_counter.zip")
-    
-    # Evaluate
-    print("\nEvaluating...")
-    obs = env.reset()
-    total_reward = 0
-    for _ in range(1000):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, done, info = env.step(action)
-        total_reward += reward.sum()
-    
-    print(f"Evaluation total reward: {total_reward:.2f}")
-    
-    env.close()
 
+    started = time.perf_counter()
+    try:
+        model.learn(
+            total_timesteps=args.total_timesteps,
+            callback=callback,
+            progress_bar=args.progress,
+        )
+        elapsed = time.perf_counter() - started
+        model_path = output_dir / "model"
+        model.save(str(model_path))
+    finally:
+        env.close()
 
-def demo_without_sb3():
-    """Demo that works without stable-baselines3."""
-    print("=== Manual Training Loop Demo ===\n")
-    print("(Install stable-baselines3 for full PPO training)")
-    
-    # Create environment directly
-    config = wasmrl.EnvConfig(
-        num_envs=4,
-        max_memory_mb=64,
-        fuel_per_step=1_000_000,
-        auto_reset=True,
+    metadata: Dict[str, Any] = {
+        "component": str(component),
+        "env_config": json.loads(args.env_config),
+        "num_envs": args.num_envs,
+        "seed": args.seed,
+        "requested_timesteps": args.total_timesteps,
+        "trained_timesteps": model.num_timesteps,
+        "n_steps": args.n_steps,
+        "batch_size": batch_size,
+        "elapsed_seconds": elapsed,
+        "environment_steps_per_second": model.num_timesteps / elapsed,
+        "completed_episodes": len(callback.episode_rewards),
+        "mean_training_reward_last_100": (
+            float(np.mean(callback.episode_rewards[-100:]))
+            if callback.episode_rewards
+            else None
+        ),
+        "device": device,
+        "accelerator": accelerator,
+        "stable_baselines3_version": stable_baselines3.__version__,
+    }
+    (output_dir / "training.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    env = wasmrl.WasmVecEnv("./envs/counter_env.wasm", config)
-    
-    print(f"Created {env.num_envs} parallel environments")
-    print(f"Observation space: {env.single_observation_space}")
-    print(f"Action space: {env.single_action_space}")
-    
-    # Simple rollout
-    obs, _ = env.reset()
-    total_rewards = np.zeros(env.num_envs)
-    
-    for step in range(500):
-        # Random policy
-        actions = env.sample_actions()
-        obs, rewards, dones, truncs, info = env.step(actions)
-        total_rewards += rewards
-        
-        if (step + 1) % 100 == 0:
-            print(f"Step {step + 1}: Total rewards = {total_rewards}")
-    
-    print(f"\nFinal total rewards: {total_rewards}")
-    env.close()
+    print("Training complete in {:.2f}s ({:.1f} env steps/s)".format(
+        elapsed, metadata["environment_steps_per_second"]
+    ))
+    print("Model: {}".format(output_dir / "model.zip"))
+    print("Metadata: {}".format(output_dir / "training.json"))
+    return 0
 
 
 if __name__ == "__main__":
-    if HAS_SB3:
-        train_ppo()
-    else:
-        demo_without_sb3()
-    
-    print("\n✅ Training example completed!")
+    raise SystemExit(main())

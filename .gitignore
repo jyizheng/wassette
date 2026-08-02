@@ -1,5 +1,8 @@
 /target
 /wasmrl/target
+/wasmrl/.venv
+/wasmrl/artifacts
+/wasmrl/crates/wasmrl-py/target
 /bin
 .DS_Store
 /result
